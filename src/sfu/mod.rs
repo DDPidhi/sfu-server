@@ -1,1 +1,1 @@
-pub mod basic_sfu_connection;
+pub mod connection;
