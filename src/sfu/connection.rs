@@ -10,6 +10,14 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType};
 
+pub type TrackNotificationSender = mpsc::UnboundedSender<(String, String)>;
+
+pub struct SfuConnection {
+    pub peer_id: String,
+    pub peer_connection: Arc<RTCPeerConnection>,
+    pub sender: mpsc::UnboundedSender<Message>,
+}
+
 pub fn create_api() -> Arc<API> {
     let mut media_engine = MediaEngine::default();
 
