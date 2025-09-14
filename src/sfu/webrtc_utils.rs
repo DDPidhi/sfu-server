@@ -18,6 +18,33 @@ pub struct TurnServer {
     pub credential: String,
 }
 
+impl Default for WebRTCConfig {
+    fn default() -> Self {
+        let stun_server = std::env::var("STUN_SERVER_URL")
+            .unwrap_or_else(|_| "stun:stun.l.google.com:19302".to_string());
+
+        let mut turn_servers = vec![];
+
+        // Check for optional TURN server configuration
+        if let (Ok(turn_url), Ok(username), Ok(credential)) = (
+            std::env::var("TURN_SERVER_URL"),
+            std::env::var("TURN_USERNAME"),
+            std::env::var("TURN_CREDENTIAL")
+        ) {
+            turn_servers.push(TurnServer {
+                urls: vec![turn_url],
+                username,
+                credential,
+            });
+        }
+
+        Self {
+            stun_servers: vec![stun_server],
+            turn_servers,
+        }
+    }
+}
+
 pub fn create_webrtc_api() -> Arc<API> {
     let mut media_engine = MediaEngine::default();
 
@@ -39,7 +66,7 @@ pub fn create_webrtc_api() -> Arc<API> {
         )
         .expect("Failed to register VP8 codec");
 
-    // Register Opus codec
+
     media_engine
         .register_codec(
             webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters {
@@ -67,4 +94,26 @@ pub fn create_webrtc_api() -> Arc<API> {
         .build();
 
     Arc::new(api)
+}
+
+pub fn get_ice_servers(config: &WebRTCConfig) -> Vec<RTCIceServer> {
+    let mut ice_servers = Vec::new();
+
+    for stun_server in &config.stun_servers {
+        ice_servers.push(RTCIceServer {
+            urls: vec![stun_server.clone()],
+            ..Default::default()
+        });
+    }
+
+    for turn_server in &config.turn_servers {
+        ice_servers.push(RTCIceServer {
+            urls: turn_server.urls.clone(),
+            username: turn_server.username.clone(),
+            credential: turn_server.credential.clone(),
+            credential_type: webrtc::ice_transport::ice_credential_type::RTCIceCredentialType::Password,
+        });
+    }
+
+    ice_servers
 }

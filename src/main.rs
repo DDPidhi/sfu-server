@@ -1,25 +1,19 @@
 mod sfu;
 mod config;
+mod api;
 
-use tokio::sync::mpsc;
-use warp::ws::Message;
+use warp::Filter;
+use config::Config;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let api = sfu::connection::create_api();
+async fn main() {
+    let config = Config::from_env();
 
-    let (tx, _rx) = mpsc::unbounded_channel::<Message>();
+    let routes = api::sfu_routes::sfu_websocket_route()
+        .or(api::sfu_routes::sfu_health_check())
+        .or(api::sfu_routes::sfu_config_endpoint());
 
-    let connection = sfu::connection::BasicSfuConnection::new(
-        "peer-123".to_string(),
-        tx,
-        &api,
-    ).await?;
-
-    let offer_sdp = connection.create_offer().await?;
-    println!("Offer SDP: {}", offer_sdp);
-
-    connection.close().await;
-
-    Ok(())
+    warp::serve(routes)
+        .run(config.bind_address())
+        .await;
 }

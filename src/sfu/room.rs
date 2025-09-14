@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -18,6 +17,7 @@ pub struct Peer {
     pub room_id: String,
     pub name: Option<String>,
 }
+
 #[derive(Debug, Clone)]
 pub struct Room {
     pub id: String,
@@ -37,5 +37,175 @@ impl RoomManager {
             rooms: Arc::new(RwLock::new(HashMap::new())),
             peers: Arc::new(RwLock::new(HashMap::new())),
         })
+    }
+
+    /// Generate a random room ID
+    fn generate_room_id() -> String {
+        let mut rng = rand::thread_rng();
+        format!("{:06}", rng.gen_range(100000..999999))
+    }
+
+    /// Create a new room with a proctor
+    pub async fn create_room(&self, proctor_id: String, proctor_name: Option<String>) -> Result<String, String> {
+        let room_id = Self::generate_room_id();
+
+        let room = Room {
+            id: room_id.clone(),
+            proctor_id: proctor_id.clone(),
+            students: Vec::new(),
+            created_at: std::time::SystemTime::now(),
+        };
+
+        let peer = Peer {
+            id: proctor_id.clone(),
+            role: PeerRole::Proctor,
+            room_id: room_id.clone(),
+            name: proctor_name,
+        };
+
+        let mut rooms = self.rooms.write().await;
+        let mut peers = self.peers.write().await;
+
+        // Check if room ID already exists (unlikely but possible)
+        if rooms.contains_key(&room_id) {
+            return Err("Room ID collision, please try again".to_string());
+        }
+
+        rooms.insert(room_id.clone(), room);
+        peers.insert(proctor_id, peer);
+
+        println!("Room {} created by proctor", room_id);
+        Ok(room_id)
+    }
+
+    /// Join an existing room as a student
+    pub async fn join_room(&self, room_id: String, student_id: String, student_name: Option<String>) -> Result<(), String> {
+        let mut rooms = self.rooms.write().await;
+        let mut peers = self.peers.write().await;
+
+        let room = rooms.get_mut(&room_id)
+            .ok_or_else(|| format!("Room {} does not exist", room_id))?;
+
+        // Check if student is already in the room
+        if room.students.contains(&student_id) {
+            return Ok(()); // Already in room
+        }
+
+        room.students.push(student_id.clone());
+
+        let peer = Peer {
+            id: student_id.clone(),
+            role: PeerRole::Student,
+            room_id: room_id.clone(),
+            name: student_name,
+        };
+
+        peers.insert(student_id.clone(), peer);
+
+        println!("Student {} joined room {}", student_id, room_id);
+        Ok(())
+    }
+
+    /// Get peer information
+    pub async fn get_peer(&self, peer_id: &str) -> Option<Peer> {
+        let peers = self.peers.read().await;
+        peers.get(peer_id).cloned()
+    }
+
+    /// Get room information
+    pub async fn get_room(&self, room_id: &str) -> Option<Room> {
+        let rooms = self.rooms.read().await;
+        rooms.get(room_id).cloned()
+    }
+
+    /// Remove a peer from their room
+    pub async fn remove_peer(&self, peer_id: &str) -> Option<(String, PeerRole)> {
+        let mut peers = self.peers.write().await;
+
+        if let Some(peer) = peers.remove(peer_id) {
+            let mut rooms = self.rooms.write().await;
+
+            if let Some(room) = rooms.get_mut(&peer.room_id) {
+                match peer.role {
+                    PeerRole::Proctor => {
+                        // If proctor leaves, remove the entire room
+                        println!("Proctor left, closing room {}", peer.room_id);
+                        rooms.remove(&peer.room_id);
+
+                        // Remove all students from this room
+                        let students_to_remove: Vec<String> = peers
+                            .iter()
+                            .filter(|(_, p)| p.room_id == peer.room_id)
+                            .map(|(id, _)| id.clone())
+                            .collect();
+
+                        for student_id in students_to_remove {
+                            peers.remove(&student_id);
+                        }
+                    },
+                    PeerRole::Student => {
+                        // Remove student from room's student list
+                        room.students.retain(|id| id != peer_id);
+                        println!("Student {} left room {}", peer_id, peer.room_id);
+                    },
+                }
+            }
+
+            return Some((peer.room_id, peer.role));
+        }
+
+        None
+    }
+
+    /// Get all peers in a room
+    pub async fn get_room_peers(&self, room_id: &str) -> Vec<Peer> {
+        let peers = self.peers.read().await;
+        peers.values()
+            .filter(|p| p.room_id == room_id)
+            .cloned()
+            .collect()
+    }
+
+    /// Check if a room exists
+    pub async fn room_exists(&self, room_id: &str) -> bool {
+        let rooms = self.rooms.read().await;
+        rooms.contains_key(room_id)
+    }
+
+    /// Get proctor ID for a room
+    pub async fn get_room_proctor(&self, room_id: &str) -> Option<String> {
+        let rooms = self.rooms.read().await;
+        rooms.get(room_id).map(|r| r.proctor_id.clone())
+    }
+
+    /// Check who should receive video from whom based on roles
+    pub async fn should_forward_track(&self, from_peer_id: &str, to_peer_id: &str) -> bool {
+        if from_peer_id == to_peer_id {
+            return false; // Don't forward to self
+        }
+
+        let peers = self.peers.read().await;
+
+        let from_peer = match peers.get(from_peer_id) {
+            Some(p) => p,
+            None => return false,
+        };
+
+        let to_peer = match peers.get(to_peer_id) {
+            Some(p) => p,
+            None => return false,
+        };
+
+        // Must be in the same room
+        if from_peer.room_id != to_peer.room_id {
+            return false;
+        }
+
+        // Apply role-based rules:
+        match (&from_peer.role, &to_peer.role) {
+            (PeerRole::Proctor, _) => true, // Everyone can see proctor
+            (PeerRole::Student, PeerRole::Proctor) => true, // Proctor can see all students
+            (PeerRole::Student, PeerRole::Student) => false, // Students cannot see each other
+        }
     }
 }

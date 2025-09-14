@@ -1,14 +1,15 @@
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use warp::ws::Message;
-use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::MediaEngine;
-use webrtc::api::{APIBuilder, API};
-use webrtc::ice_transport::ice_server::RTCIceServer;
-use webrtc::interceptor::registry::Registry;
+use webrtc::api::API;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType};
+use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
+use webrtc::track::track_local::TrackLocalWriter;
+
+use super::track_manager::TrackManager;
+use super::webrtc_utils::get_ice_servers;
+
 
 pub type TrackNotificationSender = mpsc::UnboundedSender<(String, String)>;
 
@@ -18,99 +19,60 @@ pub struct SfuConnection {
     pub sender: mpsc::UnboundedSender<Message>,
 }
 
-pub fn create_api() -> Arc<API> {
-    let mut media_engine = MediaEngine::default();
-
-
-    media_engine.register_codec(
-        RTCRtpCodecParameters {
-            capability: RTCRtpCodecCapability {
-                mime_type: "video/VP8".to_string(),
-                clock_rate: 90000,
-                channels: 0,
-                sdp_fmtp_line: "".to_string(),
-                rtcp_feedback: vec![],
-            },
-            payload_type: 96,
-            ..Default::default()
-        },
-        RTPCodecType::Video,
-    ).expect("Failed to register VP8");
-
-
-    media_engine.register_codec(
-        RTCRtpCodecParameters {
-            capability: RTCRtpCodecCapability {
-                mime_type: "audio/opus".to_string(),
-                clock_rate: 48000,
-                channels: 2,
-                sdp_fmtp_line: "minptime=10;useinbandfec=1".to_string(),
-                rtcp_feedback: vec![],
-            },
-            payload_type: 111,
-            ..Default::default()
-        },
-        RTPCodecType::Audio,
-    ).expect("Failed to register Opus");
-
-    let mut registry = Registry::new();
-    registry = register_default_interceptors(registry, &mut media_engine)
-        .expect("Failed to register interceptors");
-
-    Arc::new(
-        APIBuilder::new()
-            .with_media_engine(media_engine)
-            .with_interceptor_registry(registry)
-            .build(),
-    )
-}
-
-
-pub struct BasicSfuConnection {
-    pub peer_id: String,
-    pub peer_connection: Arc<RTCPeerConnection>,
-    pub sender: mpsc::UnboundedSender<Message>,
-}
-
-impl BasicSfuConnection {
-
+impl SfuConnection {
     pub async fn new(
         peer_id: String,
         sender: mpsc::UnboundedSender<Message>,
         api: &Arc<API>,
+        track_manager: Arc<TrackManager>,
+        track_notification_sender: Option<TrackNotificationSender>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-
-
         let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_string()],
-                ..Default::default()
-            }],
+            ice_servers: get_ice_servers(&Default::default()),
             ..Default::default()
         };
 
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
 
-
         peer_connection.add_transceiver_from_kind(RTPCodecType::Video, None).await?;
         peer_connection.add_transceiver_from_kind(RTPCodecType::Audio, None).await?;
 
 
-        {
-            let _peer_id_clone = peer_id.clone();
-            peer_connection.on_track(Box::new(move |track, _receiver, _transceiver| {
-                let _track_id = track.id();
-                let _track_kind = track.kind();
-                Box::pin(async move {})
-            }));
-        }
-
         let peer_id_clone = peer_id.clone();
-        peer_connection.on_ice_connection_state_change(Box::new(move |state| {
-            println!("🧊 ICE state for {}: {}", peer_id_clone, state);
-            Box::pin(async {})
-        }));
+        let track_manager_clone = track_manager.clone();
+        let pc_clone = peer_connection.clone();
+        let notification_sender = track_notification_sender.clone();
 
+        peer_connection.on_track(Box::new(move |track, _receiver, _transceiver| {
+            let peer_id = peer_id_clone.clone();
+            let track_manager = track_manager_clone.clone();
+            let pc = pc_clone.clone();
+            let track = track.clone();
+            let sender = notification_sender.clone();
+
+            Box::pin(async move {
+                // Create a unique track ID that includes the peer ID
+                let original_track_id = track.id();
+                let track_kind = track.kind().to_string();
+                let track_id = format!("{}_{}_{}",
+                                       peer_id,
+                                       track_kind,
+                                       original_track_id
+                );
+                println!("SFU received {} track from {}: {} (ID: {})",
+                         track_kind, peer_id, original_track_id, track_id);
+
+                track_manager.add_track(track_id.clone(), peer_id.clone(), track.clone()).await;
+
+                Self::start_track_forwarding(track, track_id.clone(), peer_id.clone(), track_manager.clone(), pc).await;
+
+                if let Some(tx) = sender {
+                    if let Err(_) = tx.send((peer_id.clone(), track_id.clone())) {
+                        println!("Failed to notify SFU server about new track");
+                    }
+                }
+            })
+        }));
 
         Ok(Self {
             peer_id,
@@ -119,46 +81,71 @@ impl BasicSfuConnection {
         })
     }
 
-    pub async fn create_offer(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let offer = self.peer_connection.create_offer(None).await?;
-        self.peer_connection.set_local_description(offer.clone()).await?;
+    async fn start_track_forwarding(
+        remote_track: Arc<webrtc::track::track_remote::TrackRemote>,
+        track_id: String,
+        source_peer_id: String,
+        track_manager: Arc<TrackManager>,
+        _peer_connection: Arc<RTCPeerConnection>,
+    ) {
+        tokio::spawn(async move {
+            let mut rtp_buf = vec![0u8; 1500];
+            let mut packet_count = 0u64;
 
-        Ok(offer.sdp)
+            loop {
+                match remote_track.read(&mut rtp_buf).await {
+                    Ok((rtp_packet, _)) => {
+                        packet_count += 1;
+
+                        if packet_count <= 5 {
+                            println!("Forwarding packet {} for track {}", packet_count, track_id);
+                        }
+
+                        if let Some(forwarded_track) = track_manager.get_track(&track_id).await {
+                            for (target_peer_id, local_track) in &forwarded_track.local_tracks {
+                                if target_peer_id != &source_peer_id {
+                                    if let Err(e) = local_track.write_rtp(&rtp_packet).await {
+                                        if packet_count <= 5 {
+                                            println!("Failed to forward RTP to {}: {}", target_peer_id, e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("Failed to read RTP packet for track {}: {}", track_id, e);
+                        break;
+                    }
+                }
+            }
+
+            println!("Stopped forwarding track {} after {} packets", track_id, packet_count);
+        });
     }
 
-    pub async fn handle_answer(&self, sdp: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-
-        let answer = RTCSessionDescription::answer(sdp.to_string())?;
-        self.peer_connection.set_remote_description(answer).await?;
-        Ok(())
-    }
-
-    pub async fn add_ice_candidate(
+    pub async fn add_existing_tracks(
         &self,
-        candidate: &str,
-        sdp_mid: Option<String>,
-        sdp_mline_index: Option<u16>,
+        track_manager: Arc<TrackManager>,
+        existing_track_ids: Vec<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let ice_candidate = webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
-            candidate: candidate.to_string(),
-            sdp_mid,
-            sdp_mline_index,
-            username_fragment: None,
-        };
-
-        self.peer_connection.add_ice_candidate(ice_candidate).await?;
-
+        for track_id in existing_track_ids {
+            if let Some(local_track) = track_manager
+                .create_local_track_for_peer(&track_id, &self.peer_id)
+                .await
+            {
+                self.peer_connection.add_track(local_track).await?;
+                println!("Added existing track {} to peer {}", track_id, self.peer_id);
+            }
+        }
         Ok(())
     }
 
-    pub async fn send_message(&self, message: Message) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.sender.send(message)?;
-        Ok(())
+    pub async fn send_message(&self, message: Message) -> Result<(), mpsc::error::SendError<Message>> {
+        self.sender.send(message)
     }
 
     pub async fn close(&self) {
-        println!("🔌 Closing connection for: {}", self.peer_id);
         let _ = self.peer_connection.close().await;
     }
 }
