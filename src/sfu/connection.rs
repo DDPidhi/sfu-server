@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 use warp::ws::Message;
 use webrtc::api::API;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -71,6 +71,50 @@ impl SfuConnection {
                         println!("Failed to notify SFU server about new track");
                     }
                 }
+            })
+        }));
+
+        let sender_clone = sender.clone();
+        let peer_id_for_ice = peer_id.clone();
+        peer_connection.on_ice_candidate(Box::new(move |candidate| {
+            let sender = sender_clone.clone();
+            let peer_id = peer_id_for_ice.clone();
+            Box::pin(async move {
+                if let Some(candidate) = candidate {
+                    println!("SERVER generating ICE candidate for peer {}", peer_id);
+                    if let Ok(candidate_json) = candidate.to_json() {
+                        let ice_message = serde_json::json!({
+                            "type": "IceCandidate",
+                            "peer_id": "sfu",
+                            "candidate": candidate_json.candidate,
+                            "sdp_mid": candidate_json.sdp_mid,
+                            "sdp_mline_index": candidate_json.sdp_mline_index,
+                        });
+
+                        if let Ok(msg_str) = serde_json::to_string(&ice_message) {
+                            println!("SERVER sending ICE candidate to peer {}", peer_id);
+                            let _ = sender.send(Message::text(msg_str));
+                        }
+                    }
+                } else {
+                    println!("SERVER ICE gathering complete for peer {}", peer_id);
+                }
+            })
+        }));
+
+        let peer_id_clone = peer_id.clone();
+        peer_connection.on_ice_connection_state_change(Box::new(move |state| {
+            let peer_id = peer_id_clone.clone();
+            Box::pin(async move {
+                println!("ICE connection state for {}: {:?}", peer_id, state);
+            })
+        }));
+
+        let peer_id_clone = peer_id.clone();
+        peer_connection.on_ice_gathering_state_change(Box::new(move |state| {
+            let peer_id = peer_id_clone.clone();
+            Box::pin(async move {
+                println!("ICE gathering state for {}: {:?}", peer_id, state);
             })
         }));
 

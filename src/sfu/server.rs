@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
+use tokio::time::sleep;
 use warp::ws::Message;
 use webrtc::api::API;
 
@@ -19,6 +21,7 @@ pub struct SfuServer {
     track_notification_sender: TrackNotificationSender,
     track_notification_receiver: Arc<RwLock<Option<mpsc::UnboundedReceiver<(String, String)>>>>,
     peers_with_tracks: Arc<RwLock<HashMap<String, usize>>>,
+    pending_renegotiations: Arc<RwLock<HashMap<String, bool>>>,
 }
 
 impl SfuServer {
@@ -37,6 +40,7 @@ impl SfuServer {
             track_notification_sender: track_sender,
             track_notification_receiver: Arc::new(RwLock::new(Some(track_receiver))),
             peers_with_tracks: Arc::new(RwLock::new(HashMap::new())),
+            pending_renegotiations: Arc::new(RwLock::new(HashMap::new())),
         };
 
         server
@@ -261,6 +265,12 @@ impl SfuServer {
         };
 
         if let Some(connection) = connection {
+            if connection.peer_connection.remote_description().await.is_none() {
+                println!("Warning: Received ICE candidate for {} before remote description was set", peer_id);
+            }
+
+            println!("SERVER receiving ICE candidate from peer {}", peer_id);
+
             let ice_candidate = webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
                 candidate: candidate.to_string(),
                 sdp_mid,
@@ -269,6 +279,7 @@ impl SfuServer {
             };
 
             connection.peer_connection.add_ice_candidate(ice_candidate).await?;
+            println!("SERVER added ICE candidate from peer {}", peer_id);
         }
 
         Ok(())
@@ -324,7 +335,6 @@ impl SfuServer {
             println!("Peer {} now has {} tracks", peer_id, peers.get(peer_id).unwrap());
         }
 
-
         let connections = self.connections.read().await;
         for (target_peer_id, connection) in connections.iter() {
             if target_peer_id != peer_id {
@@ -340,17 +350,68 @@ impl SfuServer {
                     connection.peer_connection.add_track(local_track).await?;
                     println!("Added track {} to peer {}", track_id, target_peer_id);
 
-                    let offer = connection.peer_connection.create_offer(None).await?;
-                    connection.peer_connection.set_local_description(offer.clone()).await?;
+                    let should_schedule = {
+                        let mut pending = self.pending_renegotiations.write().await;
+                        let is_pending = pending.contains_key(target_peer_id);
+                        pending.insert(target_peer_id.to_string(), true);
+                        !is_pending
+                    };
 
-                    let renegotiate_message = serde_json::to_string(&serde_json::json!({
-                        "type": "renegotiate",
-                        "sdp": offer.sdp
-                    }))?;
-
-                    connection.send_message(Message::text(renegotiate_message)).await?;
-                    println!("Renegotiating with {} after adding track from {}", target_peer_id, peer_id);
+                    if should_schedule {
+                        println!("Scheduling renegotiation for peer {} in 150ms", target_peer_id);
+                        let connections_clone = self.connections.clone();
+                        let target_id = target_peer_id.clone();
+                        let pending_clone = self.pending_renegotiations.clone();
+                        tokio::spawn(async move {
+                            sleep(Duration::from_millis(150)).await;
+                            let _ = Self::perform_renegotiation_static(connections_clone, pending_clone, &target_id).await;
+                        });
+                    } else {
+                        println!("Renegotiation already scheduled for peer {}, batching tracks", target_peer_id);
+                    }
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn perform_renegotiation_static(
+        connections: Arc<RwLock<HashMap<String, Arc<SfuConnection>>>>,
+        pending: Arc<RwLock<HashMap<String, bool>>>,
+        target_peer_id: &str
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        {
+            let mut pending_map = pending.write().await;
+            pending_map.remove(target_peer_id);
+        }
+
+        let connection = {
+            let connections_map = connections.read().await;
+            connections_map.get(target_peer_id).cloned()
+        };
+
+        if let Some(connection) = connection {
+            let signaling_state = connection.peer_connection.signaling_state();
+            println!("Signaling state for peer {}: {:?}", target_peer_id, signaling_state);
+
+            if signaling_state == webrtc::peer_connection::signaling_state::RTCSignalingState::Stable {
+                println!("Creating renegotiation offer for peer {} (batched)", target_peer_id);
+
+                let offer = connection.peer_connection.create_offer(None).await?;
+                connection.peer_connection.set_local_description(offer.clone()).await?;
+                println!("Set local description for peer {}", target_peer_id);
+
+                let renegotiate_message = serde_json::to_string(&serde_json::json!({
+                    "type": "renegotiate",
+                    "sdp": offer.sdp
+                }))?;
+
+                connection.send_message(Message::text(renegotiate_message)).await?;
+                println!("Sent renegotiation offer to {}", target_peer_id);
+            } else {
+                println!("Signaling state not stable for peer {}: {:?}", target_peer_id, signaling_state);
+                println!("Tracks were added but renegotiation skipped - will happen on next track or when stable");
             }
         }
 
