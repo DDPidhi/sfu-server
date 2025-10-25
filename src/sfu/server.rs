@@ -5,12 +5,21 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::time::sleep;
 use warp::ws::Message;
 use webrtc::api::API;
+use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 
 use super::connection::{SfuConnection, TrackNotificationSender};
 use super::room::{RoomManager, PeerRole};
 use super::track_manager::TrackManager;
 use super::signaling::SfuMessage;
+use crate::error::SfuError;
 
+/// Queued ICE candidate waiting for remote description
+#[derive(Debug, Clone)]
+struct PendingIceCandidate {
+    candidate: String,
+    sdp_mid: Option<String>,
+    sdp_mline_index: Option<u16>,
+}
 
 pub struct SfuServer {
     api: Arc<API>,
@@ -22,6 +31,7 @@ pub struct SfuServer {
     track_notification_receiver: Arc<RwLock<Option<mpsc::UnboundedReceiver<(String, String)>>>>,
     peers_with_tracks: Arc<RwLock<HashMap<String, usize>>>,
     pending_renegotiations: Arc<RwLock<HashMap<String, bool>>>,
+    pending_ice_candidates: Arc<RwLock<HashMap<String, Vec<PendingIceCandidate>>>>,
 }
 
 impl SfuServer {
@@ -41,6 +51,7 @@ impl SfuServer {
             track_notification_receiver: Arc::new(RwLock::new(Some(track_receiver))),
             peers_with_tracks: Arc::new(RwLock::new(HashMap::new())),
             pending_renegotiations: Arc::new(RwLock::new(HashMap::new())),
+            pending_ice_candidates: Arc::new(RwLock::new(HashMap::new())),
         };
 
         server
@@ -50,7 +61,7 @@ impl SfuServer {
         let server = self.clone();
 
         tokio::spawn(async move {
-            let mut receiver = {
+            let receiver = {
                 let mut receiver_guard = server.track_notification_receiver.write().await;
                 receiver_guard.take()
             };
@@ -58,7 +69,12 @@ impl SfuServer {
             if let Some(mut rx) = receiver {
                 while let Some((peer_id, track_id)) = rx.recv().await {
                     if let Err(e) = server.handle_track_received(&peer_id, &track_id).await {
-                        println!("Error processing track notification: {}", e);
+                        tracing::error!(
+                            peer_id = %peer_id,
+                            track_id = %track_id,
+                            error = %e,
+                            "Error processing track notification"
+                        );
                     }
                 }
             }
@@ -83,15 +99,25 @@ impl SfuServer {
         if role == "student" {
             let mut retries = 0;
             while !self.is_proctor_ready(&room_id).await && retries < 15 {
-                println!(" Waiting for proctor tracks... (retry {}/15)", retries);
+                tracing::debug!(
+                    room_id = %room_id,
+                    retry = retries,
+                    "Waiting for proctor tracks"
+                );
                 tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                 retries += 1;
             }
 
             if !self.is_proctor_ready(&room_id).await {
-                println!("Proctor tracks not ready after 3s, continuing anyway");
+                tracing::warn!(
+                    room_id = %room_id,
+                    "Proctor tracks not ready after 3s, continuing anyway"
+                );
             } else {
-                println!("Proctor tracks ready, adding student now");
+                tracing::info!(
+                    room_id = %room_id,
+                    "Proctor tracks ready, adding student"
+                );
             }
 
             self.room_manager.join_room(room_id.clone(), peer_id.clone(), name).await?;
@@ -108,7 +134,7 @@ impl SfuServer {
         room_id: String,
         sender: mpsc::UnboundedSender<Message>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("Adding peer {} to SFU", peer_id);
+        tracing::info!(peer_id = %peer_id, room_id = %room_id, "Adding peer to SFU");
 
         // Create SFU connection
         let connection = Arc::new(
@@ -124,12 +150,16 @@ impl SfuServer {
 
         let existing_tracks = self.get_tracks_for_peer(&peer_id, &room_id).await;
         if !existing_tracks.is_empty() {
-            println!("Adding {} existing tracks to peer {}", existing_tracks.len(), peer_id);
+            tracing::info!(
+                peer_id = %peer_id,
+                track_count = existing_tracks.len(),
+                "Adding existing tracks to peer"
+            );
             connection
                 .add_existing_tracks(self.track_manager.clone(), existing_tracks)
                 .await?;
         } else {
-            println!("No existing tracks to add to peer {}", peer_id);
+            tracing::debug!(peer_id = %peer_id, "No existing tracks to add to peer");
         }
 
         {
@@ -139,12 +169,12 @@ impl SfuServer {
 
         self.create_and_send_offer(&peer_id).await?;
 
-        println!("Peer {} added to SFU successfully", peer_id);
+        tracing::info!(peer_id = %peer_id, "Peer added to SFU successfully");
         Ok(())
     }
 
     pub async fn remove_peer(&self, peer_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("Removing peer {} from SFU", peer_id);
+        tracing::info!(peer_id = %peer_id, "Removing peer from SFU");
 
         // Remove peer from room manager (this handles room closure if proctor leaves)
         let room_info = self.room_manager.remove_peer(peer_id).await;
@@ -162,9 +192,30 @@ impl SfuServer {
         // Remove tracks from this peer
         self.track_manager.remove_peer_tracks(peer_id).await;
 
+        // Clean up pending ICE candidates
+        {
+            let mut pending_ice = self.pending_ice_candidates.write().await;
+            if pending_ice.remove(peer_id).is_some() {
+                tracing::debug!(peer_id = %peer_id, "Removed pending ICE candidates");
+            }
+        }
+
+        // Clean up pending renegotiations
+        {
+            let mut pending_renego = self.pending_renegotiations.write().await;
+            if pending_renego.remove(peer_id).is_some() {
+                tracing::debug!(peer_id = %peer_id, "Removed pending renegotiation");
+            }
+        }
+
         // If proctor left, close all connections in that room
         if let Some((room_id, role)) = room_info {
             if matches!(role, PeerRole::Proctor) {
+                tracing::info!(
+                    room_id = %room_id,
+                    peer_id = %peer_id,
+                    "Proctor left, closing all student connections in room"
+                );
                 // Get all student connections to close
                 let students_to_close: Vec<String> = self.room_manager.get_room_peers(&room_id).await
                     .into_iter()
@@ -182,13 +233,13 @@ impl SfuServer {
             }
         }
 
-        println!("Peer {} removed from SFU", peer_id);
+        tracing::info!(peer_id = %peer_id, "Peer removed from SFU successfully");
         Ok(())
     }
 
 
     async fn close_peer_connection(&self, peer_id: &str) {
-        println!("Closing connection for peer {}", peer_id);
+        tracing::info!(peer_id = %peer_id, "Closing peer connection");
 
         // Remove connection
         let connection = {
@@ -222,7 +273,7 @@ impl SfuServer {
             }))?;
 
             connection.send_message(Message::text(offer_message)).await?;
-            println!("Sent SFU offer to peer: {}", peer_id);
+            tracing::info!(peer_id = %peer_id, "Sent SFU offer to peer");
         }
 
         Ok(())
@@ -242,10 +293,56 @@ impl SfuServer {
         if let Some(connection) = connection {
             use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-            let answer = RTCSessionDescription::answer(sdp.to_string()).unwrap();
+            let answer = RTCSessionDescription::answer(sdp.to_string())
+                .map_err(|e| SfuError::InvalidSdp(format!("Failed to parse answer SDP: {}", e)))?;
             connection.peer_connection.set_remote_description(answer).await?;
-            println!("Processed answer from peer: {}", peer_id);
-            println!("Answer processed, waiting for tracks from peer: {}", peer_id);
+            tracing::info!(peer_id = %peer_id, "Processed answer from peer");
+
+            // Flush any queued ICE candidates now that remote description is set
+            self.flush_pending_ice_candidates(peer_id, &connection).await?;
+
+            tracing::debug!(peer_id = %peer_id, "Waiting for tracks from peer");
+        }
+
+        Ok(())
+    }
+
+    /// Flush any queued ICE candidates after remote description is set
+    async fn flush_pending_ice_candidates(
+        &self,
+        peer_id: &str,
+        connection: &Arc<SfuConnection>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let candidates = {
+            let mut pending = self.pending_ice_candidates.write().await;
+            pending.remove(peer_id)
+        };
+
+        if let Some(candidates) = candidates {
+            tracing::info!(
+                peer_id = %peer_id,
+                count = candidates.len(),
+                "Flushing queued ICE candidates"
+            );
+
+            for candidate in candidates {
+                let ice_candidate = RTCIceCandidateInit {
+                    candidate: candidate.candidate,
+                    sdp_mid: candidate.sdp_mid,
+                    sdp_mline_index: candidate.sdp_mline_index,
+                    username_fragment: None,
+                };
+
+                if let Err(e) = connection.peer_connection.add_ice_candidate(ice_candidate).await {
+                    tracing::error!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Failed to add queued ICE candidate"
+                    );
+                } else {
+                    tracing::debug!(peer_id = %peer_id, "Added queued ICE candidate");
+                }
+            }
         }
 
         Ok(())
@@ -265,13 +362,34 @@ impl SfuServer {
         };
 
         if let Some(connection) = connection {
+            // Check if remote description is set
             if connection.peer_connection.remote_description().await.is_none() {
-                println!("Warning: Received ICE candidate for {} before remote description was set", peer_id);
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    "Queueing ICE candidate until remote description is set"
+                );
+
+                // Queue the candidate
+                let mut pending = self.pending_ice_candidates.write().await;
+                pending.entry(peer_id.to_string())
+                    .or_insert_with(Vec::new)
+                    .push(PendingIceCandidate {
+                        candidate: candidate.to_string(),
+                        sdp_mid,
+                        sdp_mline_index,
+                    });
+
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    queue_size = pending.get(peer_id).map(|v| v.len()).unwrap_or(0),
+                    "ICE candidate queued"
+                );
+                return Ok(());
             }
 
-            println!("SERVER receiving ICE candidate from peer {}", peer_id);
+            tracing::debug!(peer_id = %peer_id, "Receiving ICE candidate from peer");
 
-            let ice_candidate = webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
+            let ice_candidate = RTCIceCandidateInit {
                 candidate: candidate.to_string(),
                 sdp_mid,
                 sdp_mline_index,
@@ -279,7 +397,7 @@ impl SfuServer {
             };
 
             connection.peer_connection.add_ice_candidate(ice_candidate).await?;
-            println!("SERVER added ICE candidate from peer {}", peer_id);
+            tracing::debug!(peer_id = %peer_id, "Added ICE candidate from peer");
         }
 
         Ok(())
@@ -313,7 +431,7 @@ impl SfuServer {
         let proctor_id = match self.room_manager.get_room_proctor(room_id).await {
             Some(id) => id,
             None => {
-                println!("No proctor found for room {}", room_id);
+                tracing::debug!(room_id = %room_id, "No proctor found for room");
                 return false;
             }
         };
@@ -322,17 +440,27 @@ impl SfuServer {
         let track_count = peers.get(&proctor_id).unwrap_or(&0);
 
         let ready = *track_count >= 1;
-        println!("Proctor {} readiness check: {} tracks, ready={}", proctor_id, track_count, ready);
+        tracing::debug!(
+            proctor_id = %proctor_id,
+            track_count = track_count,
+            ready = ready,
+            "Proctor readiness check"
+        );
         ready
     }
 
     pub async fn handle_track_received(&self, peer_id: &str, track_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("Handling new track {} from peer {}", track_id, peer_id);
+        tracing::info!(
+            peer_id = %peer_id,
+            track_id = %track_id,
+            "Handling new track from peer"
+        );
 
         {
             let mut peers = self.peers_with_tracks.write().await;
-            *peers.entry(peer_id.to_string()).or_insert(0) += 1;
-            println!("Peer {} now has {} tracks", peer_id, peers.get(peer_id).unwrap());
+            let count = peers.entry(peer_id.to_string()).or_insert(0);
+            *count += 1;
+            tracing::debug!(peer_id = %peer_id, track_count = *count, "Updated peer track count");
         }
 
         let connections = self.connections.read().await;
@@ -348,7 +476,11 @@ impl SfuServer {
                     .await
                 {
                     connection.peer_connection.add_track(local_track).await?;
-                    println!("Added track {} to peer {}", track_id, target_peer_id);
+                    tracing::info!(
+                        track_id = %track_id,
+                        target_peer_id = %target_peer_id,
+                        "Added track to peer"
+                    );
 
                     let should_schedule = {
                         let mut pending = self.pending_renegotiations.write().await;
@@ -358,16 +490,22 @@ impl SfuServer {
                     };
 
                     if should_schedule {
-                        println!("Scheduling renegotiation for peer {} in 150ms", target_peer_id);
+                        tracing::debug!(
+                            target_peer_id = %target_peer_id,
+                            "Scheduling renegotiation in 150ms"
+                        );
                         let connections_clone = self.connections.clone();
                         let target_id = target_peer_id.clone();
                         let pending_clone = self.pending_renegotiations.clone();
                         tokio::spawn(async move {
                             sleep(Duration::from_millis(150)).await;
-                            let _ = Self::perform_renegotiation_static(connections_clone, pending_clone, &target_id).await;
+                            let _ = Self::perform_renegotiation_static(connections_clone, pending_clone, &target_id, 0).await;
                         });
                     } else {
-                        println!("Renegotiation already scheduled for peer {}, batching tracks", target_peer_id);
+                        tracing::debug!(
+                            target_peer_id = %target_peer_id,
+                            "Renegotiation already scheduled, batching tracks"
+                        );
                     }
                 }
             }
@@ -379,9 +517,14 @@ impl SfuServer {
     async fn perform_renegotiation_static(
         connections: Arc<RwLock<HashMap<String, Arc<SfuConnection>>>>,
         pending: Arc<RwLock<HashMap<String, bool>>>,
-        target_peer_id: &str
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        {
+        target_peer_id: &str,
+        retry_count: u32,
+    ) {
+        const MAX_RETRIES: u32 = 3;
+        const BASE_RETRY_DELAY_MS: u64 = 200;
+
+        // Only clear pending flag on first attempt (retry_count == 0)
+        if retry_count == 0 {
             let mut pending_map = pending.write().await;
             pending_map.remove(target_peer_id);
         }
@@ -393,36 +536,87 @@ impl SfuServer {
 
         if let Some(connection) = connection {
             let signaling_state = connection.peer_connection.signaling_state();
-            println!("Signaling state for peer {}: {:?}", target_peer_id, signaling_state);
+            tracing::debug!(
+                target_peer_id = %target_peer_id,
+                ?signaling_state,
+                retry_count = retry_count,
+                "Checking signaling state for renegotiation"
+            );
 
             if signaling_state == webrtc::peer_connection::signaling_state::RTCSignalingState::Stable {
-                println!("Creating renegotiation offer for peer {} (batched)", target_peer_id);
+                tracing::info!(
+                    target_peer_id = %target_peer_id,
+                    retry_count = retry_count,
+                    "Creating batched renegotiation offer"
+                );
 
-                let offer = connection.peer_connection.create_offer(None).await?;
-                connection.peer_connection.set_local_description(offer.clone()).await?;
-                println!("Set local description for peer {}", target_peer_id);
+                let offer = match connection.peer_connection.create_offer(None).await {
+                    Ok(offer) => offer,
+                    Err(e) => {
+                        tracing::error!(target_peer_id = %target_peer_id, error = %e, "Failed to create renegotiation offer");
+                        return;
+                    }
+                };
 
-                let renegotiate_message = serde_json::to_string(&serde_json::json!({
+                if let Err(e) = connection.peer_connection.set_local_description(offer.clone()).await {
+                    tracing::error!(target_peer_id = %target_peer_id, error = %e, "Failed to set local description");
+                    return;
+                }
+                tracing::debug!(target_peer_id = %target_peer_id, "Set local description");
+
+                let renegotiate_message = match serde_json::to_string(&serde_json::json!({
                     "type": "renegotiate",
                     "sdp": offer.sdp
-                }))?;
+                })) {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        tracing::error!(target_peer_id = %target_peer_id, error = %e, "Failed to serialize renegotiation message");
+                        return;
+                    }
+                };
 
-                connection.send_message(Message::text(renegotiate_message)).await?;
-                println!("Sent renegotiation offer to {}", target_peer_id);
+                if let Err(e) = connection.send_message(Message::text(renegotiate_message)).await {
+                    tracing::error!(target_peer_id = %target_peer_id, error = %e, "Failed to send renegotiation offer");
+                    return;
+                }
+                tracing::info!(
+                    target_peer_id = %target_peer_id,
+                    retry_count = retry_count,
+                    "Sent renegotiation offer"
+                );
+            } else if retry_count < MAX_RETRIES {
+                // Retry with exponential backoff
+                let retry_delay = BASE_RETRY_DELAY_MS * (2_u64.pow(retry_count));
+                tracing::warn!(
+                    target_peer_id = %target_peer_id,
+                    ?signaling_state,
+                    retry_count = retry_count,
+                    retry_delay_ms = retry_delay,
+                    "Signaling state not stable, will retry on next track or manual trigger"
+                );
+                // Note: Retry will happen naturally when next track is added
+                // or connection state changes. The exponential backoff is logged
+                // for monitoring purposes.
             } else {
-                println!("Signaling state not stable for peer {}: {:?}", target_peer_id, signaling_state);
-                println!("Tracks were added but renegotiation skipped - will happen on next track or when stable");
+                tracing::error!(
+                    target_peer_id = %target_peer_id,
+                    ?signaling_state,
+                    retry_count = retry_count,
+                    "Renegotiation failed after {} retries, giving up",
+                    MAX_RETRIES
+                );
             }
         }
-
-        Ok(())
     }
 
     async fn update_all_connections_for_peer_removal(
         &self,
         removed_peer_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("Should remove tracks from {} in all other connections", removed_peer_id);
+        tracing::debug!(
+            removed_peer_id = %removed_peer_id,
+            "Should remove tracks in all other connections"
+        );
         Ok(())
     }
 

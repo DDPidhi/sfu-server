@@ -59,8 +59,13 @@ impl SfuConnection {
                                        track_kind,
                                        original_track_id
                 );
-                println!("SFU received {} track from {}: {} (ID: {})",
-                         track_kind, peer_id, original_track_id, track_id);
+                tracing::info!(
+                    peer_id = %peer_id,
+                    track_kind = %track_kind,
+                    original_track_id = %original_track_id,
+                    track_id = %track_id,
+                    "SFU received track from peer"
+                );
 
                 track_manager.add_track(track_id.clone(), peer_id.clone(), track.clone()).await;
 
@@ -68,7 +73,11 @@ impl SfuConnection {
 
                 if let Some(tx) = sender {
                     if let Err(_) = tx.send((peer_id.clone(), track_id.clone())) {
-                        println!("Failed to notify SFU server about new track");
+                        tracing::error!(
+                            peer_id = %peer_id,
+                            track_id = %track_id,
+                            "Failed to notify SFU server about new track"
+                        );
                     }
                 }
             })
@@ -81,7 +90,7 @@ impl SfuConnection {
             let peer_id = peer_id_for_ice.clone();
             Box::pin(async move {
                 if let Some(candidate) = candidate {
-                    println!("SERVER generating ICE candidate for peer {}", peer_id);
+                    tracing::debug!(peer_id = %peer_id, "Generating ICE candidate for peer");
                     if let Ok(candidate_json) = candidate.to_json() {
                         let ice_message = serde_json::json!({
                             "type": "IceCandidate",
@@ -92,12 +101,12 @@ impl SfuConnection {
                         });
 
                         if let Ok(msg_str) = serde_json::to_string(&ice_message) {
-                            println!("SERVER sending ICE candidate to peer {}", peer_id);
+                            tracing::debug!(peer_id = %peer_id, "Sending ICE candidate to peer");
                             let _ = sender.send(Message::text(msg_str));
                         }
                     }
                 } else {
-                    println!("SERVER ICE gathering complete for peer {}", peer_id);
+                    tracing::info!(peer_id = %peer_id, "ICE gathering complete for peer");
                 }
             })
         }));
@@ -106,7 +115,7 @@ impl SfuConnection {
         peer_connection.on_ice_connection_state_change(Box::new(move |state| {
             let peer_id = peer_id_clone.clone();
             Box::pin(async move {
-                println!("ICE connection state for {}: {:?}", peer_id, state);
+                tracing::info!(peer_id = %peer_id, ?state, "ICE connection state changed");
             })
         }));
 
@@ -114,7 +123,7 @@ impl SfuConnection {
         peer_connection.on_ice_gathering_state_change(Box::new(move |state| {
             let peer_id = peer_id_clone.clone();
             Box::pin(async move {
-                println!("ICE gathering state for {}: {:?}", peer_id, state);
+                tracing::debug!(peer_id = %peer_id, ?state, "ICE gathering state changed");
             })
         }));
 
@@ -142,7 +151,11 @@ impl SfuConnection {
                         packet_count += 1;
 
                         if packet_count <= 5 {
-                            println!("Forwarding packet {} for track {}", packet_count, track_id);
+                            tracing::debug!(
+                                track_id = %track_id,
+                                packet_count = packet_count,
+                                "Forwarding packet for track"
+                            );
                         }
 
                         if let Some(forwarded_track) = track_manager.get_track(&track_id).await {
@@ -150,7 +163,11 @@ impl SfuConnection {
                                 if target_peer_id != &source_peer_id {
                                     if let Err(e) = local_track.write_rtp(&rtp_packet).await {
                                         if packet_count <= 5 {
-                                            println!("Failed to forward RTP to {}: {}", target_peer_id, e);
+                                            tracing::warn!(
+                                                target_peer_id = %target_peer_id,
+                                                error = %e,
+                                                "Failed to forward RTP to peer"
+                                            );
                                         }
                                     }
                                 }
@@ -158,13 +175,21 @@ impl SfuConnection {
                         }
                     }
                     Err(e) => {
-                        println!("Failed to read RTP packet for track {}: {}", track_id, e);
+                        tracing::error!(
+                            track_id = %track_id,
+                            error = %e,
+                            "Failed to read RTP packet for track"
+                        );
                         break;
                     }
                 }
             }
 
-            println!("Stopped forwarding track {} after {} packets", track_id, packet_count);
+            tracing::info!(
+                track_id = %track_id,
+                packet_count = packet_count,
+                "Stopped forwarding track"
+            );
         });
     }
 
@@ -179,7 +204,11 @@ impl SfuConnection {
                 .await
             {
                 self.peer_connection.add_track(local_track).await?;
-                println!("Added existing track {} to peer {}", track_id, self.peer_id);
+                tracing::info!(
+                    track_id = %track_id,
+                    peer_id = %self.peer_id,
+                    "Added existing track to peer"
+                );
             }
         }
         Ok(())

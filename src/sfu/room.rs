@@ -74,7 +74,7 @@ impl RoomManager {
         rooms.insert(room_id.clone(), room);
         peers.insert(proctor_id, peer);
 
-        println!("Room {} created by proctor", room_id);
+        tracing::info!(room_id = %room_id, "Room created by proctor");
         Ok(room_id)
     }
 
@@ -102,7 +102,7 @@ impl RoomManager {
 
         peers.insert(student_id.clone(), peer);
 
-        println!("Student {} joined room {}", student_id, room_id);
+        tracing::info!(student_id = %student_id, room_id = %room_id, "Student joined room");
         Ok(())
     }
 
@@ -129,7 +129,7 @@ impl RoomManager {
                 match peer.role {
                     PeerRole::Proctor => {
                         // If proctor leaves, remove the entire room
-                        println!("Proctor left, closing room {}", peer.room_id);
+                        tracing::info!(room_id = %peer.room_id, "Proctor left, closing room");
                         rooms.remove(&peer.room_id);
 
                         // Remove all students from this room
@@ -146,7 +146,11 @@ impl RoomManager {
                     PeerRole::Student => {
                         // Remove student from room's student list
                         room.students.retain(|id| id != peer_id);
-                        println!("Student {} left room {}", peer_id, peer.room_id);
+                        tracing::info!(
+                            student_id = %peer_id,
+                            room_id = %peer.room_id,
+                            "Student left room"
+                        );
                     },
                 }
             }

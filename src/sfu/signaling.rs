@@ -122,13 +122,13 @@ impl SfuSignalingHandler {
                 self.handle_media_ready(peer_id, has_video, has_audio).await;
             }
             _ => {
-                println!("Unhandled SFU message type");
+                tracing::warn!("Unhandled SFU message type");
             }
         }
     }
 
     async fn handle_create_room(&mut self, peer_id: String, name: Option<String>) {
-        println!("Proctor {} creating room", peer_id);
+        tracing::info!(peer_id = %peer_id, name = ?name, "Proctor creating room");
 
         match self.sfu_server.create_room(peer_id.clone(), name).await {
             Ok(room_id) => {
@@ -137,26 +137,32 @@ impl SfuSignalingHandler {
 
                 let message = SfuMessage::RoomCreated { room_id: room_id.clone() };
                 if let Ok(msg_str) = serde_json::to_string(&message) {
-                    println!("Sending RoomCreated message: {}", msg_str);
+                    tracing::debug!(room_id = %room_id, "Sending RoomCreated message");
                     let _ = self.sender.send(Message::text(msg_str));
                 } else {
-                    println!("Failed to serialize RoomCreated message");
+                    tracing::error!("Failed to serialize RoomCreated message");
                 }
 
                 if let Err(e) = self.sfu_server.add_peer(peer_id, room_id, self.sender.clone()).await {
-                    println!("Failed to add proctor to SFU: {}", e);
+                    tracing::error!(error = %e, "Failed to add proctor to SFU");
                     self.send_error(&format!("Failed to setup room: {}", e)).await;
                 }
             }
             Err(e) => {
-                println!("Failed to create room: {}", e);
+                tracing::error!(error = %e, "Failed to create room");
                 self.send_error(&format!("Failed to create room: {}", e)).await;
             }
         }
     }
 
     async fn handle_join(&mut self, room_id: String, peer_id: String, name: Option<String>, role: String) {
-        println!("{} {} joining room {}", role, peer_id, room_id);
+        tracing::info!(
+            role = %role,
+            peer_id = %peer_id,
+            room_id = %room_id,
+            name = ?name,
+            "Peer joining room"
+        );
 
         self.peer_id = Some(peer_id.clone());
         self.room_id = Some(room_id.clone());
@@ -165,7 +171,7 @@ impl SfuSignalingHandler {
 
         // Add peer to SFU with role
         if let Err(e) = self.sfu_server.add_peer_with_role(peer_id.clone(), room_id, role, name, self.sender.clone()).await {
-            println!("Failed to add peer to SFU: {}", e);
+            tracing::error!(peer_id = %peer_id, error = %e, "Failed to add peer to SFU");
             self.send_error(&format!("Failed to join: {}", e)).await;
         } else {
             self.send_join_success().await;
@@ -173,7 +179,12 @@ impl SfuSignalingHandler {
     }
 
     async fn handle_join_request(&mut self, room_id: String, peer_id: String, name: Option<String>, role: String) {
-        println!("Student {} requesting to join room {}", peer_id, room_id);
+        tracing::info!(
+            peer_id = %peer_id,
+            room_id = %room_id,
+            name = ?name,
+            "Student requesting to join room"
+        );
 
         self.peer_id = Some(peer_id.clone());
         self.room_id = Some(room_id.clone());
@@ -182,29 +193,34 @@ impl SfuSignalingHandler {
 
         // Forward the join request to the proctor (but don't add connection to SFU yet)
         if let Err(e) = self.sfu_server.forward_join_request(room_id, peer_id, name, role).await {
-            println!("Failed to forward join request: {}", e);
+            tracing::error!(error = %e, "Failed to forward join request");
             self.send_error(&format!("Failed to send join request: {}", e)).await;
         } else {
-            println!("Join request forwarded to proctor");
+            tracing::debug!("Join request forwarded to proctor");
             self.send_join_request_sent().await;
         }
     }
 
     async fn handle_join_response(&mut self, room_id: String, peer_id: String, approved: bool, requester_peer_id: String) {
-        println!("Proctor {} responded to join request from {} in room {}: {}",
-                 peer_id, requester_peer_id, room_id, if approved { "APPROVED" } else { "DENIED" });
+        tracing::info!(
+            proctor_id = %peer_id,
+            requester_peer_id = %requester_peer_id,
+            room_id = %room_id,
+            approved = approved,
+            "Proctor responded to join request"
+        );
 
         if let Err(e) = self.sfu_server.send_join_response(room_id, requester_peer_id, approved).await {
-            println!("Failed to send join response: {}", e);
+            tracing::error!(error = %e, "Failed to send join response");
             self.send_error(&format!("Failed to send join response: {}", e)).await;
         }
     }
 
     async fn handle_leave(&mut self, peer_id: String) {
-        println!("Client {} leaving", peer_id);
+        tracing::info!(peer_id = %peer_id, "Client leaving");
 
         if let Err(e) = self.sfu_server.remove_peer(&peer_id).await {
-            println!("Failed to remove peer from SFU: {}", e);
+            tracing::error!(peer_id = %peer_id, error = %e, "Failed to remove peer from SFU");
         }
 
         self.peer_id = None;
@@ -212,13 +228,13 @@ impl SfuSignalingHandler {
     }
 
     async fn handle_answer(&self, peer_id: String, sdp: String) {
-        println!("Received answer from client: {}", peer_id);
+        tracing::info!(peer_id = %peer_id, "Received answer from client");
 
         if let Err(e) = self.sfu_server.handle_answer(&peer_id, &sdp).await {
-            println!("Failed to handle answer: {}", e);
+            tracing::error!(peer_id = %peer_id, error = %e, "Failed to handle answer");
             self.send_error(&format!("Failed to process answer: {}", e)).await;
         } else {
-            println!("Successfully processed answer from: {}", peer_id);
+            tracing::debug!(peer_id = %peer_id, "Successfully processed answer");
         }
     }
 
@@ -233,12 +249,17 @@ impl SfuSignalingHandler {
             .handle_ice_candidate(&peer_id, &candidate, sdp_mid, sdp_mline_index)
             .await
         {
-            println!("Failed to handle ICE candidate: {}", e);
+            tracing::error!(peer_id = %peer_id, error = %e, "Failed to handle ICE candidate");
         }
     }
 
     async fn handle_media_ready(&self, peer_id: String, has_video: bool, has_audio: bool) {
-        println!("Client {} media ready (video: {}, audio: {})", peer_id, has_video, has_audio);
+        tracing::info!(
+            peer_id = %peer_id,
+            has_video = has_video,
+            has_audio = has_audio,
+            "Client media ready"
+        );
     }
 
     async fn send_join_success(&self) {

@@ -9,7 +9,7 @@ pub async fn handle_sfu_websocket(
     websocket: WebSocket,
     sfu_server: Arc<SfuServer>,
 ) {
-    println!("New SFU WebSocket connection established");
+    tracing::info!("New SFU WebSocket connection established");
 
     let (mut ws_sender, mut ws_receiver) = websocket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
@@ -21,7 +21,7 @@ pub async fn handle_sfu_websocket(
     let sender_task = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
             if let Err(e) = ws_sender.send(message).await {
-                println!("Failed to send WebSocket message: {}", e);
+                tracing::error!(error = %e, "Failed to send WebSocket message");
                 break;
             }
         }
@@ -31,12 +31,12 @@ pub async fn handle_sfu_websocket(
         match result {
             Ok(message) => {
                 if let Err(e) = handle_websocket_message(&mut signaling_handler, message).await {
-                    println!("Error handling WebSocket message: {}", e);
+                    tracing::error!(error = %e, "Error handling WebSocket message");
                     break;
                 }
             }
             Err(e) => {
-                println!("WebSocket error: {}", e);
+                tracing::error!(error = %e, "WebSocket error");
                 break;
             }
         }
@@ -45,7 +45,7 @@ pub async fn handle_sfu_websocket(
 
     signaling_handler.cleanup().await;
     sender_task.abort();
-    println!("SFU WebSocket connection closed");
+    tracing::info!("SFU WebSocket connection closed");
 }
 
 async fn handle_websocket_message(
@@ -53,15 +53,18 @@ async fn handle_websocket_message(
     message: Message,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Ok(text) = message.to_str() {
-        println!("Received SFU message: {}", text);
+        tracing::debug!("Received SFU message: {}", text);
 
         match serde_json::from_str::<SfuMessage>(text) {
             Ok(sfu_message) => {
                 signaling_handler.handle_message(sfu_message).await;
             }
             Err(e) => {
-                println!("Failed to parse SFU message: {}", e);
-                println!("Raw message: {}", text);
+                tracing::error!(
+                    error = %e,
+                    raw_message = %text,
+                    "Failed to parse SFU message"
+                );
             }
         }
     }
