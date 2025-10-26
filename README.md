@@ -158,10 +158,40 @@ The server accepts JSON messages over WebSocket for signaling:
 
 ## Development
 
-### Run Tests
+### CLI Validation Tool
+
+The project includes a CLI tool for testing and validating server functionality. See [CLI_GUIDE.md](CLI_GUIDE.md) for detailed usage.
+
 ```bash
-cargo test
+# Build the CLI tool
+cargo build --release --bin sfu-cli
+
+# Check server health
+./target/release/sfu-cli health
+
+# Run automated validations
+./target/release/sfu-cli validate --all
+
+# Interactive mode
+./target/release/sfu-cli interactive
 ```
+
+### Run Tests
+
+The project includes comprehensive unit and integration tests. See [TESTING.md](TESTING.md) for detailed testing guide.
+
+```bash
+# Run unit tests
+cargo test
+
+# Run integration tests (requires running server)
+cargo test --test integration_test -- --ignored --test-threads=1
+```
+
+**Test Coverage:**
+- 29 unit tests (configuration, room management, signaling)
+- 7 integration tests (HTTP endpoints, WebSocket flows)
+- CLI validation tool with 5 automated scenarios
 
 ### Check Code
 ```bash
