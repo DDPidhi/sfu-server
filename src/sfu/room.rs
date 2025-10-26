@@ -213,3 +213,196 @@ impl RoomManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_create_room() {
+        let room_manager = RoomManager::new();
+        let proctor_id = "proctor_123".to_string();
+        let proctor_name = Some("Dr. Smith".to_string());
+
+        let result = room_manager.create_room(proctor_id.clone(), proctor_name).await;
+        assert!(result.is_ok());
+
+        let room_id = result.unwrap();
+        assert_eq!(room_id.len(), 6); // Room ID should be 6 digits
+
+        // Verify room exists
+        assert!(room_manager.room_exists(&room_id).await);
+
+        // Verify proctor is registered
+        let peer = room_manager.get_peer(&proctor_id).await;
+        assert!(peer.is_some());
+        let peer = peer.unwrap();
+        assert_eq!(peer.id, proctor_id);
+        matches!(peer.role, PeerRole::Proctor);
+    }
+
+    #[tokio::test]
+    async fn test_join_room() {
+        let room_manager = RoomManager::new();
+        let proctor_id = "proctor_123".to_string();
+
+        // Create room first
+        let room_id = room_manager.create_room(proctor_id, None).await.unwrap();
+
+        // Join as student
+        let student_id = "student_456".to_string();
+        let result = room_manager.join_room(room_id.clone(), student_id.clone(), Some("John Doe".to_string())).await;
+        assert!(result.is_ok());
+
+        // Verify student is in room
+        let peer = room_manager.get_peer(&student_id).await;
+        assert!(peer.is_some());
+        let peer = peer.unwrap();
+        matches!(peer.role, PeerRole::Student);
+        assert_eq!(peer.room_id, room_id);
+    }
+
+    #[tokio::test]
+    async fn test_join_nonexistent_room() {
+        let room_manager = RoomManager::new();
+        let student_id = "student_456".to_string();
+
+        let result = room_manager.join_room("999999".to_string(), student_id, None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn test_remove_student() {
+        let room_manager = RoomManager::new();
+        let proctor_id = "proctor_123".to_string();
+        let room_id = room_manager.create_room(proctor_id, None).await.unwrap();
+
+        let student_id = "student_456".to_string();
+        room_manager.join_room(room_id.clone(), student_id.clone(), None).await.unwrap();
+
+        // Remove student
+        let result = room_manager.remove_peer(&student_id).await;
+        assert!(result.is_some());
+        let (removed_room_id, role) = result.unwrap();
+        assert_eq!(removed_room_id, room_id);
+        matches!(role, PeerRole::Student);
+
+        // Verify student is removed
+        let peer = room_manager.get_peer(&student_id).await;
+        assert!(peer.is_none());
+
+        // Room should still exist
+        assert!(room_manager.room_exists(&room_id).await);
+    }
+
+    #[tokio::test]
+    async fn test_remove_proctor_closes_room() {
+        let room_manager = RoomManager::new();
+        let proctor_id = "proctor_123".to_string();
+        let room_id = room_manager.create_room(proctor_id.clone(), None).await.unwrap();
+
+        let student_id = "student_456".to_string();
+        room_manager.join_room(room_id.clone(), student_id.clone(), None).await.unwrap();
+
+        // Remove proctor
+        let result = room_manager.remove_peer(&proctor_id).await;
+        assert!(result.is_some());
+
+        // Room should be closed
+        assert!(!room_manager.room_exists(&room_id).await);
+
+        // All students should be removed
+        let student_peer = room_manager.get_peer(&student_id).await;
+        assert!(student_peer.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_room_peers() {
+        let room_manager = RoomManager::new();
+        let proctor_id = "proctor_123".to_string();
+        let room_id = room_manager.create_room(proctor_id, None).await.unwrap();
+
+        let student1 = "student_1".to_string();
+        let student2 = "student_2".to_string();
+        room_manager.join_room(room_id.clone(), student1, None).await.unwrap();
+        room_manager.join_room(room_id.clone(), student2, None).await.unwrap();
+
+        let peers = room_manager.get_room_peers(&room_id).await;
+        assert_eq!(peers.len(), 3); // 1 proctor + 2 students
+    }
+
+    #[tokio::test]
+    async fn test_should_forward_track_proctor_to_all() {
+        let room_manager = RoomManager::new();
+        let proctor_id = "proctor_123".to_string();
+        let room_id = room_manager.create_room(proctor_id.clone(), None).await.unwrap();
+
+        let student_id = "student_456".to_string();
+        room_manager.join_room(room_id, student_id.clone(), None).await.unwrap();
+
+        // Proctor's video should be forwarded to student
+        let should_forward = room_manager.should_forward_track(&proctor_id, &student_id).await;
+        assert!(should_forward);
+    }
+
+    #[tokio::test]
+    async fn test_should_forward_track_student_to_proctor() {
+        let room_manager = RoomManager::new();
+        let proctor_id = "proctor_123".to_string();
+        let room_id = room_manager.create_room(proctor_id.clone(), None).await.unwrap();
+
+        let student_id = "student_456".to_string();
+        room_manager.join_room(room_id, student_id.clone(), None).await.unwrap();
+
+        // Student's video should be forwarded to proctor
+        let should_forward = room_manager.should_forward_track(&student_id, &proctor_id).await;
+        assert!(should_forward);
+    }
+
+    #[tokio::test]
+    async fn test_should_not_forward_track_student_to_student() {
+        let room_manager = RoomManager::new();
+        let proctor_id = "proctor_123".to_string();
+        let room_id = room_manager.create_room(proctor_id, None).await.unwrap();
+
+        let student1 = "student_1".to_string();
+        let student2 = "student_2".to_string();
+        room_manager.join_room(room_id.clone(), student1.clone(), None).await.unwrap();
+        room_manager.join_room(room_id, student2.clone(), None).await.unwrap();
+
+        // Students should not see each other
+        let should_forward = room_manager.should_forward_track(&student1, &student2).await;
+        assert!(!should_forward);
+    }
+
+    #[tokio::test]
+    async fn test_should_not_forward_to_self() {
+        let room_manager = RoomManager::new();
+        let proctor_id = "proctor_123".to_string();
+        room_manager.create_room(proctor_id.clone(), None).await.unwrap();
+
+        // Should not forward to self
+        let should_forward = room_manager.should_forward_track(&proctor_id, &proctor_id).await;
+        assert!(!should_forward);
+    }
+
+    #[tokio::test]
+    async fn test_should_not_forward_across_rooms() {
+        let room_manager = RoomManager::new();
+        let proctor1 = "proctor_1".to_string();
+        let proctor2 = "proctor_2".to_string();
+
+        let room1 = room_manager.create_room(proctor1.clone(), None).await.unwrap();
+        let room2 = room_manager.create_room(proctor2.clone(), None).await.unwrap();
+
+        let student1 = "student_1".to_string();
+        let student2 = "student_2".to_string();
+        room_manager.join_room(room1, student1.clone(), None).await.unwrap();
+        room_manager.join_room(room2, student2.clone(), None).await.unwrap();
+
+        // Should not forward tracks across different rooms
+        let should_forward = room_manager.should_forward_track(&student1, &student2).await;
+        assert!(!should_forward);
+    }
+}

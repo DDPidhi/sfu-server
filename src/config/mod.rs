@@ -59,3 +59,73 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_localhost() {
+        let config = Config {
+            server: ServerConfig {
+                host: "localhost".to_string(),
+                port: 8080,
+            },
+        };
+
+        let addr = config.bind_address();
+        assert_eq!(addr, ([127, 0, 0, 1], 8080));
+    }
+
+    #[test]
+    fn test_parse_ipv4_address() {
+        let config = Config {
+            server: ServerConfig {
+                host: "192.168.1.1".to_string(),
+                port: 3000,
+            },
+        };
+
+        let addr = config.bind_address();
+        assert_eq!(addr, ([192, 168, 1, 1], 3000));
+    }
+
+    #[test]
+    fn test_parse_all_interfaces() {
+        let config = Config {
+            server: ServerConfig {
+                host: "0.0.0.0".to_string(),
+                port: 8080,
+            },
+        };
+
+        let addr = config.bind_address();
+        assert_eq!(addr, ([0, 0, 0, 0], 8080));
+    }
+
+    #[test]
+    fn test_parse_empty_host() {
+        let config = Config {
+            server: ServerConfig {
+                host: "".to_string(),
+                port: 8080,
+            },
+        };
+
+        let addr = config.bind_address();
+        assert_eq!(addr, ([0, 0, 0, 0], 8080));
+    }
+
+    #[test]
+    fn test_parse_invalid_hostname_defaults_to_all() {
+        let config = Config {
+            server: ServerConfig {
+                host: "invalid-hostname".to_string(),
+                port: 9000,
+            },
+        };
+
+        let addr = config.bind_address();
+        assert_eq!(addr, ([0, 0, 0, 0], 9000));
+    }
+}

@@ -302,3 +302,157 @@ impl SfuSignalingHandler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_serialize_create_room() {
+        let msg = SfuMessage::CreateRoom {
+            peer_id: "proctor_123".to_string(),
+            name: Some("Dr. Smith".to_string()),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("CreateRoom"));
+        assert!(json.contains("proctor_123"));
+        assert!(json.contains("Dr. Smith"));
+    }
+
+    #[test]
+    fn test_deserialize_create_room() {
+        let json = r#"{"type":"CreateRoom","peer_id":"proctor_123","name":"Dr. Smith"}"#;
+        let msg: SfuMessage = serde_json::from_str(json).unwrap();
+
+        match msg {
+            SfuMessage::CreateRoom { peer_id, name } => {
+                assert_eq!(peer_id, "proctor_123");
+                assert_eq!(name, Some("Dr. Smith".to_string()));
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_join() {
+        let msg = SfuMessage::Join {
+            room_id: "123456".to_string(),
+            peer_id: "student_789".to_string(),
+            name: Some("John Doe".to_string()),
+            role: "student".to_string(),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("Join"));
+        assert!(json.contains("123456"));
+        assert!(json.contains("student_789"));
+    }
+
+    #[test]
+    fn test_deserialize_join() {
+        let json = r#"{"type":"Join","room_id":"123456","peer_id":"student_789","name":"John Doe","role":"student"}"#;
+        let msg: SfuMessage = serde_json::from_str(json).unwrap();
+
+        match msg {
+            SfuMessage::Join { room_id, peer_id, name, role } => {
+                assert_eq!(room_id, "123456");
+                assert_eq!(peer_id, "student_789");
+                assert_eq!(name, Some("John Doe".to_string()));
+                assert_eq!(role, "student");
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_offer() {
+        let msg = SfuMessage::Offer {
+            sdp: "v=0\r\no=- 123".to_string(),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("Offer"));
+        assert!(json.contains("v=0"));
+    }
+
+    #[test]
+    fn test_deserialize_answer() {
+        let json = r#"{"type":"Answer","peer_id":"peer_123","sdp":"v=0\r\no=- 456"}"#;
+        let msg: SfuMessage = serde_json::from_str(json).unwrap();
+
+        match msg {
+            SfuMessage::Answer { peer_id, sdp } => {
+                assert_eq!(peer_id, "peer_123");
+                assert!(sdp.contains("v=0"));
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_ice_candidate() {
+        let msg = SfuMessage::IceCandidate {
+            peer_id: "peer_123".to_string(),
+            candidate: "candidate:0 1 UDP 123456 192.168.1.1 54321 typ host".to_string(),
+            sdp_mid: Some("0".to_string()),
+            sdp_mline_index: Some(0),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("IceCandidate"));
+        assert!(json.contains("peer_123"));
+        assert!(json.contains("candidate"));
+    }
+
+    #[test]
+    fn test_deserialize_ice_candidate() {
+        let json = r#"{"type":"IceCandidate","peer_id":"peer_123","candidate":"candidate:0 1 UDP 123456 192.168.1.1 54321 typ host","sdp_mid":"0","sdp_mline_index":0}"#;
+        let msg: SfuMessage = serde_json::from_str(json).unwrap();
+
+        match msg {
+            SfuMessage::IceCandidate { peer_id, candidate, sdp_mid, sdp_mline_index } => {
+                assert_eq!(peer_id, "peer_123");
+                assert!(candidate.contains("candidate:"));
+                assert_eq!(sdp_mid, Some("0".to_string()));
+                assert_eq!(sdp_mline_index, Some(0));
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_media_ready() {
+        let msg = SfuMessage::MediaReady {
+            peer_id: "peer_123".to_string(),
+            has_video: true,
+            has_audio: true,
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("MediaReady"));
+        assert!(json.contains("true"));
+    }
+
+    #[test]
+    fn test_serialize_leave() {
+        let msg = SfuMessage::Leave {
+            peer_id: "peer_123".to_string(),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("Leave"));
+        assert!(json.contains("peer_123"));
+    }
+
+    #[test]
+    fn test_serialize_room_created() {
+        let msg = SfuMessage::RoomCreated {
+            room_id: "123456".to_string(),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("RoomCreated"));
+        assert!(json.contains("123456"));
+    }
+}
