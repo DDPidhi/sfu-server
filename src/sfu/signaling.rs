@@ -68,6 +68,52 @@ pub enum SfuMessage {
         has_video: bool,
         has_audio: bool,
     },
+
+    // Recording messages
+    StartRecording {
+        room_id: String,
+        peer_id: String,
+    },
+
+    StopRecording {
+        room_id: String,
+        peer_id: String,
+    },
+
+    StopAllRecordings {
+        room_id: String,
+    },
+
+    RecordingStarted {
+        room_id: String,
+        peer_id: String,
+    },
+
+    RecordingStopped {
+        room_id: String,
+        peer_id: String,
+        file_path: String,
+    },
+
+    AllRecordingsStopped {
+        room_id: String,
+        recordings: Vec<(String, String)>, // Vec of (peer_id, file_path)
+    },
+
+    RecordingError {
+        room_id: String,
+        peer_id: Option<String>,
+        error: String,
+    },
+
+    GetRecordingStatus {
+        room_id: String,
+    },
+
+    RecordingStatus {
+        room_id: String,
+        recording_peers: Vec<String>,
+    },
 }
 
 pub struct SfuSignalingHandler {
@@ -120,6 +166,18 @@ impl SfuSignalingHandler {
             }
             SfuMessage::MediaReady { peer_id, has_video, has_audio } => {
                 self.handle_media_ready(peer_id, has_video, has_audio).await;
+            }
+            SfuMessage::StartRecording { room_id, peer_id } => {
+                self.handle_start_recording(room_id, peer_id).await;
+            }
+            SfuMessage::StopRecording { room_id, peer_id } => {
+                self.handle_stop_recording(room_id, peer_id).await;
+            }
+            SfuMessage::StopAllRecordings { room_id } => {
+                self.handle_stop_all_recordings(room_id).await;
+            }
+            SfuMessage::GetRecordingStatus { room_id } => {
+                self.handle_get_recording_status(room_id).await;
             }
             _ => {
                 tracing::warn!("Unhandled SFU message type");
@@ -260,6 +318,92 @@ impl SfuSignalingHandler {
             has_audio = has_audio,
             "Client media ready"
         );
+    }
+
+    async fn handle_start_recording(&self, room_id: String, peer_id: String) {
+        tracing::info!(room_id = %room_id, peer_id = %peer_id, "Starting recording for peer");
+
+        match self.sfu_server.start_recording(&room_id, &peer_id).await {
+            Ok(()) => {
+                let message = SfuMessage::RecordingStarted {
+                    room_id,
+                    peer_id,
+                };
+                if let Ok(msg_str) = serde_json::to_string(&message) {
+                    let _ = self.sender.send(Message::text(msg_str));
+                }
+            }
+            Err(e) => {
+                tracing::error!(room_id = %room_id, peer_id = %peer_id, error = %e, "Failed to start recording");
+                let message = SfuMessage::RecordingError {
+                    room_id,
+                    peer_id: Some(peer_id),
+                    error: e.to_string(),
+                };
+                if let Ok(msg_str) = serde_json::to_string(&message) {
+                    let _ = self.sender.send(Message::text(msg_str));
+                }
+            }
+        }
+    }
+
+    async fn handle_stop_recording(&self, room_id: String, peer_id: String) {
+        tracing::info!(room_id = %room_id, peer_id = %peer_id, "Stopping recording for peer");
+
+        match self.sfu_server.stop_recording(&room_id, &peer_id).await {
+            Ok(file_path) => {
+                let message = SfuMessage::RecordingStopped {
+                    room_id,
+                    peer_id,
+                    file_path: file_path.to_string_lossy().to_string(),
+                };
+                if let Ok(msg_str) = serde_json::to_string(&message) {
+                    let _ = self.sender.send(Message::text(msg_str));
+                }
+            }
+            Err(e) => {
+                tracing::error!(room_id = %room_id, peer_id = %peer_id, error = %e, "Failed to stop recording");
+                let message = SfuMessage::RecordingError {
+                    room_id,
+                    peer_id: Some(peer_id),
+                    error: e.to_string(),
+                };
+                if let Ok(msg_str) = serde_json::to_string(&message) {
+                    let _ = self.sender.send(Message::text(msg_str));
+                }
+            }
+        }
+    }
+
+    async fn handle_stop_all_recordings(&self, room_id: String) {
+        tracing::info!(room_id = %room_id, "Stopping all recordings in room");
+
+        let stopped = self.sfu_server.stop_all_recordings(&room_id).await;
+        let recordings: Vec<(String, String)> = stopped
+            .into_iter()
+            .map(|(peer_id, path)| (peer_id, path.to_string_lossy().to_string()))
+            .collect();
+
+        let message = SfuMessage::AllRecordingsStopped {
+            room_id,
+            recordings,
+        };
+        if let Ok(msg_str) = serde_json::to_string(&message) {
+            let _ = self.sender.send(Message::text(msg_str));
+        }
+    }
+
+    async fn handle_get_recording_status(&self, room_id: String) {
+        tracing::debug!(room_id = %room_id, "Getting recording status");
+
+        let recording_peers = self.sfu_server.get_recording_peers(&room_id).await;
+        let message = SfuMessage::RecordingStatus {
+            room_id,
+            recording_peers,
+        };
+        if let Ok(msg_str) = serde_json::to_string(&message) {
+            let _ = self.sender.send(Message::text(msg_str));
+        }
     }
 
     async fn send_join_success(&self) {

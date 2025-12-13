@@ -6,9 +6,11 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc::track::track_local::TrackLocalWriter;
+use webrtc::util::Marshal;
 
 use super::track_manager::TrackManager;
 use super::webrtc_utils::get_ice_servers;
+use crate::recording::RecordingManager;
 
 
 pub type TrackNotificationSender = mpsc::UnboundedSender<(String, String)>;
@@ -17,15 +19,18 @@ pub struct SfuConnection {
     pub peer_id: String,
     pub peer_connection: Arc<RTCPeerConnection>,
     pub sender: mpsc::UnboundedSender<Message>,
+    pub room_id: Option<String>,
 }
 
 impl SfuConnection {
     pub async fn new(
         peer_id: String,
+        room_id: String,
         sender: mpsc::UnboundedSender<Message>,
         api: &Arc<API>,
         track_manager: Arc<TrackManager>,
         track_notification_sender: Option<TrackNotificationSender>,
+        recording_manager: Option<Arc<RecordingManager>>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let config = RTCConfiguration {
             ice_servers: get_ice_servers(&Default::default()),
@@ -39,16 +44,20 @@ impl SfuConnection {
 
 
         let peer_id_clone = peer_id.clone();
+        let room_id_clone = room_id.clone();
         let track_manager_clone = track_manager.clone();
         let pc_clone = peer_connection.clone();
         let notification_sender = track_notification_sender.clone();
+        let recording_manager_clone = recording_manager.clone();
 
         peer_connection.on_track(Box::new(move |track, _receiver, _transceiver| {
             let peer_id = peer_id_clone.clone();
+            let room_id = room_id_clone.clone();
             let track_manager = track_manager_clone.clone();
             let pc = pc_clone.clone();
             let track = track.clone();
             let sender = notification_sender.clone();
+            let recorder = recording_manager_clone.clone();
 
             Box::pin(async move {
                 // Create a unique track ID that includes the peer ID
@@ -69,7 +78,15 @@ impl SfuConnection {
 
                 track_manager.add_track(track_id.clone(), peer_id.clone(), track.clone()).await;
 
-                Self::start_track_forwarding(track, track_id.clone(), peer_id.clone(), track_manager.clone(), pc).await;
+                Self::start_track_forwarding(
+                    track,
+                    track_id.clone(),
+                    peer_id.clone(),
+                    room_id,
+                    track_manager.clone(),
+                    pc,
+                    recorder,
+                ).await;
 
                 if let Some(tx) = sender {
                     if let Err(_) = tx.send((peer_id.clone(), track_id.clone())) {
@@ -131,6 +148,7 @@ impl SfuConnection {
             peer_id,
             peer_connection,
             sender,
+            room_id: Some(room_id),
         })
     }
 
@@ -138,9 +156,13 @@ impl SfuConnection {
         remote_track: Arc<webrtc::track::track_remote::TrackRemote>,
         track_id: String,
         source_peer_id: String,
+        room_id: String,
         track_manager: Arc<TrackManager>,
         _peer_connection: Arc<RTCPeerConnection>,
+        recording_manager: Option<Arc<RecordingManager>>,
     ) {
+        let is_video = remote_track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video;
+
         tokio::spawn(async move {
             let mut rtp_buf = vec![0u8; 1500];
             let mut packet_count = 0u64;
@@ -158,6 +180,7 @@ impl SfuConnection {
                             );
                         }
 
+                        // Forward to other peers
                         if let Some(forwarded_track) = track_manager.get_track(&track_id).await {
                             for (target_peer_id, local_track) in &forwarded_track.local_tracks {
                                 if target_peer_id != &source_peer_id {
@@ -171,6 +194,16 @@ impl SfuConnection {
                                         }
                                     }
                                 }
+                            }
+                        }
+
+                        // Push to recording pipeline for this specific peer
+                        if let Some(ref recorder) = recording_manager {
+                            let rtp_data = rtp_packet.marshal().unwrap_or_default();
+                            if is_video {
+                                let _ = recorder.push_video_rtp(&room_id, &source_peer_id, &rtp_data).await;
+                            } else {
+                                let _ = recorder.push_audio_rtp(&room_id, &source_peer_id, &rtp_data).await;
                             }
                         }
                     }

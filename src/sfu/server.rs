@@ -12,6 +12,7 @@ use super::room::{RoomManager, PeerRole};
 use super::track_manager::TrackManager;
 use super::signaling::SfuMessage;
 use crate::error::SfuError;
+use crate::recording::RecordingManager;
 
 /// Queued ICE candidate waiting for remote description
 #[derive(Debug, Clone)]
@@ -32,6 +33,7 @@ pub struct SfuServer {
     peers_with_tracks: Arc<RwLock<HashMap<String, usize>>>,
     pending_renegotiations: Arc<RwLock<HashMap<String, bool>>>,
     pending_ice_candidates: Arc<RwLock<HashMap<String, Vec<PendingIceCandidate>>>>,
+    recording_manager: Arc<RecordingManager>,
 }
 
 impl SfuServer {
@@ -40,6 +42,9 @@ impl SfuServer {
         let api = webrtc_utils::create_webrtc_api();
 
         let (track_sender, track_receiver) = mpsc::unbounded_channel();
+
+        let recording_output_dir = std::env::var("RECORDING_OUTPUT_DIR")
+            .unwrap_or_else(|_| "./recordings".to_string());
 
         let server = Self {
             api,
@@ -52,6 +57,7 @@ impl SfuServer {
             peers_with_tracks: Arc::new(RwLock::new(HashMap::new())),
             pending_renegotiations: Arc::new(RwLock::new(HashMap::new())),
             pending_ice_candidates: Arc::new(RwLock::new(HashMap::new())),
+            recording_manager: Arc::new(RecordingManager::new(&recording_output_dir)),
         };
 
         server
@@ -83,7 +89,25 @@ impl SfuServer {
 
 
     pub async fn create_room(&self, proctor_id: String, proctor_name: Option<String>) -> Result<String, String> {
-        self.room_manager.create_room(proctor_id, proctor_name).await
+        let room_id = self.room_manager.create_room(proctor_id.clone(), proctor_name).await?;
+
+        // Auto-start recording for the proctor when room is created
+        if let Err(e) = self.recording_manager.start_recording(&room_id, &proctor_id).await {
+            tracing::error!(
+                room_id = %room_id,
+                proctor_id = %proctor_id,
+                error = %e,
+                "Failed to auto-start recording for proctor"
+            );
+        } else {
+            tracing::info!(
+                room_id = %room_id,
+                proctor_id = %proctor_id,
+                "Auto-started recording for proctor"
+            );
+        }
+
+        Ok(room_id)
     }
 
 
@@ -121,6 +145,22 @@ impl SfuServer {
             }
 
             self.room_manager.join_room(room_id.clone(), peer_id.clone(), name).await?;
+
+            // Auto-start recording for the student when they join
+            if let Err(e) = self.recording_manager.start_recording(&room_id, &peer_id).await {
+                tracing::error!(
+                    room_id = %room_id,
+                    peer_id = %peer_id,
+                    error = %e,
+                    "Failed to auto-start recording for student"
+                );
+            } else {
+                tracing::info!(
+                    room_id = %room_id,
+                    peer_id = %peer_id,
+                    "Auto-started recording for student"
+                );
+            }
         }
 
 
@@ -140,10 +180,12 @@ impl SfuServer {
         let connection = Arc::new(
             SfuConnection::new(
                 peer_id.clone(),
+                room_id.clone(),
                 sender,
                 &self.api,
                 self.track_manager.clone(),
                 Some(self.track_notification_sender.clone()),
+                Some(self.recording_manager.clone()),
             )
                 .await?,
         );
@@ -208,14 +250,26 @@ impl SfuServer {
             }
         }
 
-        // If proctor left, close all connections in that room
+        // Handle recording cleanup and room closure
         if let Some((room_id, role)) = room_info {
             if matches!(role, PeerRole::Proctor) {
                 tracing::info!(
                     room_id = %room_id,
                     peer_id = %peer_id,
-                    "Proctor left, closing all student connections in room"
+                    "Proctor left, stopping all recordings and closing room"
                 );
+
+                // Stop all recordings in the room (proctor + all students)
+                let stopped_recordings = self.recording_manager.stop_all_recordings_in_room(&room_id).await;
+                for (stopped_peer_id, file_path) in &stopped_recordings {
+                    tracing::info!(
+                        room_id = %room_id,
+                        peer_id = %stopped_peer_id,
+                        file = %file_path.display(),
+                        "Recording saved on room close"
+                    );
+                }
+
                 // Get all student connections to close
                 let students_to_close: Vec<String> = self.room_manager.get_room_peers(&room_id).await
                     .into_iter()
@@ -228,6 +282,14 @@ impl SfuServer {
                     self.close_peer_connection(&student_id).await;
                 }
             } else {
+                // Student left - stop their recording
+                self.recording_manager.cleanup_peer(&room_id, peer_id).await;
+                tracing::info!(
+                    room_id = %room_id,
+                    peer_id = %peer_id,
+                    "Stopped recording for leaving student"
+                );
+
                 // Update all other connections to remove tracks from this peer
                 self.update_all_connections_for_peer_removal(peer_id).await?;
             }
@@ -719,5 +781,33 @@ impl SfuServer {
     pub async fn remove_pending_student(&self, student_peer_id: &str) {
         let mut pending = self.pending_students.write().await;
         pending.remove(student_peer_id);
+    }
+
+    // Recording methods
+    pub async fn start_recording(&self, room_id: &str, peer_id: &str) -> Result<(), SfuError> {
+        tracing::info!(room_id = %room_id, peer_id = %peer_id, "Starting recording for peer");
+        self.recording_manager.start_recording(room_id, peer_id).await
+    }
+
+    pub async fn stop_recording(&self, room_id: &str, peer_id: &str) -> Result<std::path::PathBuf, SfuError> {
+        tracing::info!(room_id = %room_id, peer_id = %peer_id, "Stopping recording for peer");
+        self.recording_manager.stop_recording(room_id, peer_id).await
+    }
+
+    pub async fn stop_all_recordings(&self, room_id: &str) -> Vec<(String, std::path::PathBuf)> {
+        tracing::info!(room_id = %room_id, "Stopping all recordings in room");
+        self.recording_manager.stop_all_recordings_in_room(room_id).await
+    }
+
+    pub async fn is_peer_recording(&self, room_id: &str, peer_id: &str) -> bool {
+        self.recording_manager.is_recording(room_id, peer_id).await
+    }
+
+    pub async fn get_recording_peers(&self, room_id: &str) -> Vec<String> {
+        self.recording_manager.get_recording_peers(room_id).await
+    }
+
+    pub fn get_recording_manager(&self) -> Arc<RecordingManager> {
+        self.recording_manager.clone()
     }
 }

@@ -27,3 +27,8 @@ clap = { version = "4.4", features = ["derive"] }
 colored = "2.1"
 reqwest = { version = "0.11", features = ["json"] }
 tokio-tungstenite = "0.21"
+gstreamer = "0.22"
+gstreamer-app = "0.22"
+gstreamer-video = "0.22"
+gstreamer-audio = "0.22"
+gstreamer-pbutils = "0.22"

@@ -2,6 +2,7 @@ mod sfu;
 mod config;
 mod api;
 mod error;
+mod recording;
 
 use warp::Filter;
 use config::Config;

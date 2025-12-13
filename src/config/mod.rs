@@ -3,11 +3,17 @@ use std::net::{IpAddr, Ipv4Addr};
 
 pub struct Config {
     pub server: ServerConfig,
+    pub recording: RecordingConfig,
 }
 
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+}
+
+pub struct RecordingConfig {
+    pub enabled: bool,
+    pub output_dir: String,
 }
 
 impl Config {
@@ -21,6 +27,14 @@ impl Config {
                     .unwrap_or_else(|_| "8080".to_string())
                     .parse()
                     .expect("Invalid SERVER_PORT"),
+            },
+            recording: RecordingConfig {
+                enabled: env::var("RECORDING_ENABLED")
+                    .unwrap_or_else(|_| "true".to_string())
+                    .parse()
+                    .unwrap_or(true),
+                output_dir: env::var("RECORDING_OUTPUT_DIR")
+                    .unwrap_or_else(|_| "./recordings".to_string()),
             },
         }
     }
@@ -64,6 +78,13 @@ impl Config {
 mod tests {
     use super::*;
 
+    fn default_recording_config() -> RecordingConfig {
+        RecordingConfig {
+            enabled: true,
+            output_dir: "./recordings".to_string(),
+        }
+    }
+
     #[test]
     fn test_parse_localhost() {
         let config = Config {
@@ -71,6 +92,7 @@ mod tests {
                 host: "localhost".to_string(),
                 port: 8080,
             },
+            recording: default_recording_config(),
         };
 
         let addr = config.bind_address();
@@ -84,6 +106,7 @@ mod tests {
                 host: "192.168.1.1".to_string(),
                 port: 3000,
             },
+            recording: default_recording_config(),
         };
 
         let addr = config.bind_address();
@@ -97,6 +120,7 @@ mod tests {
                 host: "0.0.0.0".to_string(),
                 port: 8080,
             },
+            recording: default_recording_config(),
         };
 
         let addr = config.bind_address();
@@ -110,6 +134,7 @@ mod tests {
                 host: "".to_string(),
                 port: 8080,
             },
+            recording: default_recording_config(),
         };
 
         let addr = config.bind_address();
@@ -123,6 +148,7 @@ mod tests {
                 host: "invalid-hostname".to_string(),
                 port: 9000,
             },
+            recording: default_recording_config(),
         };
 
         let addr = config.bind_address();
