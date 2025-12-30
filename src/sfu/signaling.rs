@@ -5,6 +5,15 @@ use warp::ws::Message;
 
 use super::server::SfuServer;
 
+/// Recording info for stopped recordings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordingInfo {
+    pub peer_id: String,
+    pub file_path: Option<String>,
+    pub cid: Option<String>,
+    pub ipfs_gateway_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum SfuMessage {
@@ -92,12 +101,14 @@ pub enum SfuMessage {
     RecordingStopped {
         room_id: String,
         peer_id: String,
-        file_path: String,
+        file_path: Option<String>,
+        cid: Option<String>,
+        ipfs_gateway_url: Option<String>,
     },
 
     AllRecordingsStopped {
         room_id: String,
-        recordings: Vec<(String, String)>, // Vec of (peer_id, file_path)
+        recordings: Vec<RecordingInfo>,
     },
 
     RecordingError {
@@ -351,11 +362,13 @@ impl SfuSignalingHandler {
         tracing::info!(room_id = %room_id, peer_id = %peer_id, "Stopping recording for peer");
 
         match self.sfu_server.stop_recording(&room_id, &peer_id).await {
-            Ok(file_path) => {
+            Ok(result) => {
                 let message = SfuMessage::RecordingStopped {
                     room_id,
                     peer_id,
-                    file_path: file_path.to_string_lossy().to_string(),
+                    file_path: Some(result.file_path.to_string_lossy().to_string()),
+                    cid: result.cid,
+                    ipfs_gateway_url: result.ipfs_gateway_url,
                 };
                 if let Ok(msg_str) = serde_json::to_string(&message) {
                     let _ = self.sender.send(Message::text(msg_str));
@@ -379,9 +392,14 @@ impl SfuSignalingHandler {
         tracing::info!(room_id = %room_id, "Stopping all recordings in room");
 
         let stopped = self.sfu_server.stop_all_recordings(&room_id).await;
-        let recordings: Vec<(String, String)> = stopped
+        let recordings: Vec<RecordingInfo> = stopped
             .into_iter()
-            .map(|(peer_id, path)| (peer_id, path.to_string_lossy().to_string()))
+            .map(|(peer_id, result)| RecordingInfo {
+                peer_id,
+                file_path: Some(result.file_path.to_string_lossy().to_string()),
+                cid: result.cid,
+                ipfs_gateway_url: result.ipfs_gateway_url,
+            })
             .collect();
 
         let message = SfuMessage::AllRecordingsStopped {

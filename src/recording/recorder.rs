@@ -4,25 +4,36 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::error::SfuError;
+use crate::ipfs::IpfsClient;
 use super::pipeline::RecordingPipeline;
 use super::state::RecordingState;
 
 /// Key for identifying a recording: (room_id, peer_id)
 pub type RecordingKey = (String, String);
 
+/// Result of stopping a recording, including optional IPFS upload info
+#[derive(Debug, Clone)]
+pub struct RecordingResult {
+    pub file_path: PathBuf,
+    pub cid: Option<String>,
+    pub ipfs_gateway_url: Option<String>,
+}
+
 pub struct RecordingManager {
     recordings: Arc<RwLock<HashMap<RecordingKey, Arc<RecordingPipeline>>>>,
     output_dir: String,
+    ipfs_client: Option<Arc<IpfsClient>>,
 }
 
 impl RecordingManager {
-    pub fn new(output_dir: &str) -> Self {
+    pub fn new(output_dir: &str, ipfs_client: Option<Arc<IpfsClient>>) -> Self {
         // Create output directory if it doesn't exist
         std::fs::create_dir_all(output_dir).ok();
 
         Self {
             recordings: Arc::new(RwLock::new(HashMap::new())),
             output_dir: output_dir.to_string(),
+            ipfs_client,
         }
     }
 
@@ -51,7 +62,7 @@ impl RecordingManager {
     }
 
     /// Stop recording for a specific peer in a room
-    pub async fn stop_recording(&self, room_id: &str, peer_id: &str) -> Result<PathBuf, SfuError> {
+    pub async fn stop_recording(&self, room_id: &str, peer_id: &str) -> Result<RecordingResult, SfuError> {
         let mut recordings = self.recordings.write().await;
         let key = (room_id.to_string(), peer_id.to_string());
 
@@ -69,11 +80,42 @@ impl RecordingManager {
             file = %output_path.display(),
             "Stopped recording for peer"
         );
-        Ok(output_path)
+
+        // Upload to IPFS if configured
+        let (cid, ipfs_gateway_url) = if let Some(ref client) = self.ipfs_client {
+            match client.upload_file(&output_path, room_id, peer_id).await {
+                Ok(result) => {
+                    tracing::info!(
+                        room_id = %room_id,
+                        peer_id = %peer_id,
+                        cid = %result.cid,
+                        "Uploaded recording to IPFS"
+                    );
+                    (Some(result.cid), Some(result.gateway_url))
+                }
+                Err(e) => {
+                    tracing::error!(
+                        room_id = %room_id,
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Failed to upload recording to IPFS, continuing with local file only"
+                    );
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+        Ok(RecordingResult {
+            file_path: output_path,
+            cid,
+            ipfs_gateway_url,
+        })
     }
 
     /// Stop all recordings in a room (used when room closes)
-    pub async fn stop_all_recordings_in_room(&self, room_id: &str) -> Vec<(String, PathBuf)> {
+    pub async fn stop_all_recordings_in_room(&self, room_id: &str) -> Vec<(String, RecordingResult)> {
         let mut recordings = self.recordings.write().await;
         let mut stopped = Vec::new();
 
@@ -88,14 +130,45 @@ impl RecordingManager {
             let peer_id = key.1.clone();
             if let Some(pipeline) = recordings.remove(&key) {
                 match pipeline.stop().await {
-                    Ok(path) => {
+                    Ok(output_path) => {
                         tracing::info!(
                             room_id = %room_id,
                             peer_id = %peer_id,
-                            file = %path.display(),
+                            file = %output_path.display(),
                             "Stopped recording for peer (room cleanup)"
                         );
-                        stopped.push((peer_id, path));
+
+                        // Upload to IPFS if configured
+                        let (cid, ipfs_gateway_url) = if let Some(ref client) = self.ipfs_client {
+                            match client.upload_file(&output_path, room_id, &peer_id).await {
+                                Ok(result) => {
+                                    tracing::info!(
+                                        room_id = %room_id,
+                                        peer_id = %peer_id,
+                                        cid = %result.cid,
+                                        "Uploaded recording to IPFS (room cleanup)"
+                                    );
+                                    (Some(result.cid), Some(result.gateway_url))
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        room_id = %room_id,
+                                        peer_id = %peer_id,
+                                        error = %e,
+                                        "Failed to upload recording to IPFS during room cleanup"
+                                    );
+                                    (None, None)
+                                }
+                            }
+                        } else {
+                            (None, None)
+                        };
+
+                        stopped.push((peer_id, RecordingResult {
+                            file_path: output_path,
+                            cid,
+                            ipfs_gateway_url,
+                        }));
                     }
                     Err(e) => {
                         tracing::error!(

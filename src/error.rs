@@ -106,6 +106,13 @@ pub enum SfuError {
     #[error("ICE connection failed for peer {0}")]
     IceConnectionFailed(String),
 
+    /// IPFS errors
+    #[error("IPFS upload failed: {0}")]
+    IpfsUploadFailed(String),
+
+    #[error("IPFS node not reachable")]
+    IpfsNodeUnavailable,
+
     /// Generic errors
     #[error("Internal server error: {0}")]
     Internal(String),

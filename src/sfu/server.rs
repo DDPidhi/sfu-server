@@ -12,7 +12,8 @@ use super::room::{RoomManager, PeerRole};
 use super::track_manager::TrackManager;
 use super::signaling::SfuMessage;
 use crate::error::SfuError;
-use crate::recording::RecordingManager;
+use crate::recording::{RecordingManager, RecordingResult};
+use crate::ipfs::{IpfsClient, IpfsConfig};
 
 /// Queued ICE candidate waiting for remote description
 #[derive(Debug, Clone)]
@@ -46,6 +47,20 @@ impl SfuServer {
         let recording_output_dir = std::env::var("RECORDING_OUTPUT_DIR")
             .unwrap_or_else(|_| "./recordings".to_string());
 
+        // Initialize IPFS client if configured
+        let ipfs_client = IpfsConfig::from_env().and_then(|config| {
+            match IpfsClient::new(config) {
+                Ok(client) => {
+                    tracing::info!("IPFS client initialized");
+                    Some(Arc::new(client))
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to initialize IPFS client");
+                    None
+                }
+            }
+        });
+
         let server = Self {
             api,
             connections: Arc::new(RwLock::new(HashMap::new())),
@@ -57,7 +72,7 @@ impl SfuServer {
             peers_with_tracks: Arc::new(RwLock::new(HashMap::new())),
             pending_renegotiations: Arc::new(RwLock::new(HashMap::new())),
             pending_ice_candidates: Arc::new(RwLock::new(HashMap::new())),
-            recording_manager: Arc::new(RecordingManager::new(&recording_output_dir)),
+            recording_manager: Arc::new(RecordingManager::new(&recording_output_dir, ipfs_client)),
         };
 
         server
@@ -261,11 +276,12 @@ impl SfuServer {
 
                 // Stop all recordings in the room (proctor + all students)
                 let stopped_recordings = self.recording_manager.stop_all_recordings_in_room(&room_id).await;
-                for (stopped_peer_id, file_path) in &stopped_recordings {
+                for (stopped_peer_id, result) in &stopped_recordings {
                     tracing::info!(
                         room_id = %room_id,
                         peer_id = %stopped_peer_id,
-                        file = %file_path.display(),
+                        file = %result.file_path.display(),
+                        cid = ?result.cid,
                         "Recording saved on room close"
                     );
                 }
@@ -789,12 +805,12 @@ impl SfuServer {
         self.recording_manager.start_recording(room_id, peer_id).await
     }
 
-    pub async fn stop_recording(&self, room_id: &str, peer_id: &str) -> Result<std::path::PathBuf, SfuError> {
+    pub async fn stop_recording(&self, room_id: &str, peer_id: &str) -> Result<RecordingResult, SfuError> {
         tracing::info!(room_id = %room_id, peer_id = %peer_id, "Stopping recording for peer");
         self.recording_manager.stop_recording(room_id, peer_id).await
     }
 
-    pub async fn stop_all_recordings(&self, room_id: &str) -> Vec<(String, std::path::PathBuf)> {
+    pub async fn stop_all_recordings(&self, room_id: &str) -> Vec<(String, RecordingResult)> {
         tracing::info!(room_id = %room_id, "Stopping all recordings in room");
         self.recording_manager.stop_all_recordings_in_room(room_id).await
     }

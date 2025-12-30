@@ -3,6 +3,7 @@ mod config;
 mod api;
 mod error;
 mod recording;
+mod ipfs;
 
 use warp::Filter;
 use config::Config;
