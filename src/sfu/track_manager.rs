@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_remote::TrackRemote;
 
@@ -12,6 +13,18 @@ pub struct ForwardedTrack {
     pub source_peer_id: String,
     pub remote_track: Arc<TrackRemote>,
     pub local_tracks: HashMap<String, Arc<TrackLocalStaticRTP>>,
+}
+
+impl ForwardedTrack {
+    /// Check if this is a video track
+    pub fn is_video(&self) -> bool {
+        self.remote_track.kind() == RTPCodecType::Video
+    }
+
+    /// Get the SSRC of the remote track
+    pub fn ssrc(&self) -> u32 {
+        self.remote_track.ssrc()
+    }
 }
 
 
@@ -45,11 +58,13 @@ impl TrackManager {
         tracks.insert(track_id, forwarded_track);
     }
 
+    /// Create a local track for forwarding to a peer.
+    /// Returns (local_track, is_new_subscriber, is_video, ssrc, source_peer_id)
     pub async fn create_local_track_for_peer(
         &self,
         track_id: &str,
         target_peer_id: &str,
-    ) -> Option<Arc<TrackLocalStaticRTP>> {
+    ) -> Option<(Arc<TrackLocalStaticRTP>, bool, bool, u32, String)> {
         let mut tracks = self.tracks.write().await;
 
         if let Some(forwarded_track) = tracks.get_mut(track_id) {
@@ -57,8 +72,12 @@ impl TrackManager {
                 return None;
             }
 
+            let is_video = forwarded_track.is_video();
+            let ssrc = forwarded_track.ssrc();
+            let source_peer_id = forwarded_track.source_peer_id.clone();
+
             if let Some(existing_track) = forwarded_track.local_tracks.get(target_peer_id) {
-                return Some(existing_track.clone());
+                return Some((existing_track.clone(), false, is_video, ssrc, source_peer_id));
             }
 
             let codec = forwarded_track.remote_track.codec();
@@ -69,7 +88,7 @@ impl TrackManager {
             ));
 
             forwarded_track.local_tracks.insert(target_peer_id.to_string(), local_track.clone());
-            Some(local_track)
+            Some((local_track, true, is_video, ssrc, source_peer_id))
         } else {
             None
         }

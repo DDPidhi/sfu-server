@@ -1,11 +1,13 @@
 use std::sync::Arc;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::{APIBuilder, API};
+use webrtc::ice::network_type::NetworkType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
-use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
-use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
+use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType};
+use webrtc::rtp_transceiver::RTCPFeedback;
 
 pub struct WebRTCConfig {
     pub stun_servers: Vec<String>,
@@ -48,16 +50,35 @@ impl Default for WebRTCConfig {
 pub fn create_webrtc_api() -> Arc<API> {
     let mut media_engine = MediaEngine::default();
 
+    // RTCP feedback mechanisms for video - critical for keyframe recovery
+    let video_rtcp_feedback = vec![
+        RTCPFeedback {
+            typ: "goog-remb".to_string(),
+            parameter: "".to_string(),
+        },
+        RTCPFeedback {
+            typ: "ccm".to_string(),
+            parameter: "fir".to_string(),
+        },
+        RTCPFeedback {
+            typ: "nack".to_string(),
+            parameter: "".to_string(),
+        },
+        RTCPFeedback {
+            typ: "nack".to_string(),
+            parameter: "pli".to_string(),
+        },
+    ];
 
     media_engine
         .register_codec(
-            webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters {
+            RTCRtpCodecParameters {
                 capability: RTCRtpCodecCapability {
                     mime_type: "video/VP8".to_string(),
                     clock_rate: 90000,
                     channels: 0,
                     sdp_fmtp_line: "".to_string(),
-                    rtcp_feedback: vec![],
+                    rtcp_feedback: video_rtcp_feedback,
                 },
                 payload_type: 96,
                 ..Default::default()
@@ -66,10 +87,9 @@ pub fn create_webrtc_api() -> Arc<API> {
         )
         .expect("Failed to register VP8 codec");
 
-
     media_engine
         .register_codec(
-            webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters {
+            RTCRtpCodecParameters {
                 capability: RTCRtpCodecCapability {
                     mime_type: "audio/opus".to_string(),
                     clock_rate: 48000,
@@ -88,9 +108,17 @@ pub fn create_webrtc_api() -> Arc<API> {
     registry = register_default_interceptors(registry, &mut media_engine)
         .expect("Failed to register default interceptors");
 
+    // Configure SettingEngine to use IPv4 only to avoid IPv6 binding errors
+    let mut setting_engine = SettingEngine::default();
+    setting_engine.set_network_types(vec![NetworkType::Udp4, NetworkType::Tcp4]);
+
+    // Disable mDNS to reduce unnecessary warnings
+    setting_engine.set_ice_multicast_dns_mode(webrtc::ice::mdns::MulticastDnsMode::Disabled);
+
     let api = APIBuilder::new()
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
+        .with_setting_engine(setting_engine)
         .build();
 
     Arc::new(api)
