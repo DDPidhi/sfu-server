@@ -4,6 +4,7 @@ use warp::ws::Message;
 use webrtc::api::API;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc::track::track_local::TrackLocalWriter;
 use webrtc::util::Marshal;
@@ -158,30 +159,69 @@ impl SfuConnection {
         source_peer_id: String,
         room_id: String,
         track_manager: Arc<TrackManager>,
-        _peer_connection: Arc<RTCPeerConnection>,
+        peer_connection: Arc<RTCPeerConnection>,
         recording_manager: Option<Arc<RecordingManager>>,
     ) {
+        let pc = peer_connection.clone();
+        let track = remote_track.clone();
+        let tid = track_id.clone();
+
         let is_video = remote_track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video;
 
         tokio::spawn(async move {
             let mut rtp_buf = vec![0u8; 1500];
             let mut packet_count = 0u64;
+            let mut last_pli_time = std::time::Instant::now();
+            let pli_interval = std::time::Duration::from_secs(3);
+
+            // Send initial PLI to request keyframe for video tracks
+            if track.kind() == RTPCodecType::Video {
+                if let Err(e) = Self::send_pli(&pc, track.ssrc()).await {
+                    tracing::warn!(
+                        track_id = %tid,
+                        error = %e,
+                        "Failed to send initial PLI"
+                    );
+                } else {
+                    tracing::info!(
+                        track_id = %tid,
+                        ssrc = track.ssrc(),
+                        "Sent initial PLI for keyframe request"
+                    );
+                }
+            }
 
             loop {
-                match remote_track.read(&mut rtp_buf).await {
+                match track.read(&mut rtp_buf).await {
                     Ok((rtp_packet, _)) => {
                         packet_count += 1;
 
                         if packet_count <= 5 {
                             tracing::debug!(
-                                track_id = %track_id,
+                                track_id = %tid,
                                 packet_count = packet_count,
                                 "Forwarding packet for track"
                             );
                         }
 
-                        // Forward to other peers
-                        if let Some(forwarded_track) = track_manager.get_track(&track_id).await {
+                        if let Some(forwarded_track) = track_manager.get_track(&tid).await {
+                            let has_subscribers = forwarded_track.local_tracks.iter()
+                                .any(|(target_peer_id, _)| target_peer_id != &source_peer_id);
+
+                            // Send periodic PLI if we have subscribers and haven't sent one recently
+                            if has_subscribers && track.kind() == RTPCodecType::Video {
+                                let now = std::time::Instant::now();
+                                if now.duration_since(last_pli_time) >= pli_interval {
+                                    if Self::send_pli(&pc, track.ssrc()).await.is_ok() {
+                                        last_pli_time = now;
+                                        tracing::debug!(
+                                            track_id = %tid,
+                                            "Sent periodic PLI for keyframe"
+                                        );
+                                    }
+                                }
+                            }
+
                             for (target_peer_id, local_track) in &forwarded_track.local_tracks {
                                 if target_peer_id != &source_peer_id {
                                     if let Err(e) = local_track.write_rtp(&rtp_packet).await {
@@ -209,7 +249,7 @@ impl SfuConnection {
                     }
                     Err(e) => {
                         tracing::error!(
-                            track_id = %track_id,
+                            track_id = %tid,
                             error = %e,
                             "Failed to read RTP packet for track"
                         );
@@ -219,20 +259,39 @@ impl SfuConnection {
             }
 
             tracing::info!(
-                track_id = %track_id,
+                track_id = %tid,
                 packet_count = packet_count,
                 "Stopped forwarding track"
             );
         });
     }
 
+    /// Send PLI (Picture Loss Indication) to request a keyframe
+    pub async fn send_pli(
+        peer_connection: &Arc<RTCPeerConnection>,
+        media_ssrc: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pli = PictureLossIndication {
+            sender_ssrc: 0,
+            media_ssrc,
+        };
+
+        peer_connection
+            .write_rtcp(&[Box::new(pli)])
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        Ok(())
+    }
+
     pub async fn add_existing_tracks(
         &self,
         track_manager: Arc<TrackManager>,
         existing_track_ids: Vec<String>,
+        source_connections: &std::collections::HashMap<String, Arc<SfuConnection>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for track_id in existing_track_ids {
-            if let Some(local_track) = track_manager
+            if let Some((local_track, is_new, is_video, ssrc, source_peer_id)) = track_manager
                 .create_local_track_for_peer(&track_id, &self.peer_id)
                 .await
             {
@@ -242,6 +301,26 @@ impl SfuConnection {
                     peer_id = %self.peer_id,
                     "Added existing track to peer"
                 );
+
+                // Send PLI for new video track subscriptions to get immediate keyframe
+                if is_new && is_video {
+                    if let Some(source_conn) = source_connections.get(&source_peer_id) {
+                        if let Err(e) = Self::send_pli(&source_conn.peer_connection, ssrc).await {
+                            tracing::warn!(
+                                track_id = %track_id,
+                                error = %e,
+                                "Failed to send PLI for new subscriber"
+                            );
+                        } else {
+                            tracing::info!(
+                                track_id = %track_id,
+                                target_peer_id = %self.peer_id,
+                                source_peer_id = %source_peer_id,
+                                "Sent PLI for new subscriber keyframe request"
+                            );
+                        }
+                    }
+                }
             }
         }
         Ok(())

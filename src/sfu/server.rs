@@ -189,6 +189,15 @@ impl SfuServer {
         room_id: String,
         sender: mpsc::UnboundedSender<Message>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Check if peer already has an active connection to prevent duplicate joins
+        {
+            let connections = self.connections.read().await;
+            if connections.contains_key(&peer_id) {
+                tracing::warn!(peer_id = %peer_id, "Peer already connected, ignoring duplicate join");
+                return Ok(());
+            }
+        }
+
         tracing::info!(peer_id = %peer_id, room_id = %room_id, "Adding peer to SFU");
 
         // Create SFU connection
@@ -212,8 +221,14 @@ impl SfuServer {
                 track_count = existing_tracks.len(),
                 "Adding existing tracks to peer"
             );
+            // Get current connections for PLI sending
+            let connections = self.connections.read().await;
+            let connections_map: std::collections::HashMap<String, Arc<SfuConnection>> =
+                connections.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            drop(connections);
+
             connection
-                .add_existing_tracks(self.track_manager.clone(), existing_tracks)
+                .add_existing_tracks(self.track_manager.clone(), existing_tracks, &connections_map)
                 .await?;
         } else {
             tracing::debug!(peer_id = %peer_id, "No existing tracks to add to peer");
@@ -542,13 +557,16 @@ impl SfuServer {
         }
 
         let connections = self.connections.read().await;
+        // Get source connection for sending PLI
+        let source_connection = connections.get(peer_id).cloned();
+
         for (target_peer_id, connection) in connections.iter() {
             if target_peer_id != peer_id {
                 if !self.room_manager.should_forward_track(peer_id, target_peer_id).await {
                     continue;
                 }
 
-                if let Some(local_track) = self
+                if let Some((local_track, is_new, is_video, ssrc, _source_peer_id)) = self
                     .track_manager
                     .create_local_track_for_peer(track_id, target_peer_id)
                     .await
@@ -559,6 +577,25 @@ impl SfuServer {
                         target_peer_id = %target_peer_id,
                         "Added track to peer"
                     );
+
+                    // Send PLI for new video track subscriptions to get immediate keyframe
+                    if is_new && is_video {
+                        if let Some(ref src_conn) = source_connection {
+                            if let Err(e) = SfuConnection::send_pli(&src_conn.peer_connection, ssrc).await {
+                                tracing::warn!(
+                                    track_id = %track_id,
+                                    error = %e,
+                                    "Failed to send PLI for new subscriber"
+                                );
+                            } else {
+                                tracing::info!(
+                                    track_id = %track_id,
+                                    target_peer_id = %target_peer_id,
+                                    "Sent PLI for new subscriber keyframe request"
+                                );
+                            }
+                        }
+                    }
 
                     let should_schedule = {
                         let mut pending = self.pending_renegotiations.write().await;
