@@ -1,0 +1,60 @@
+services:
+  sfu-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sfu-server
+    ports:
+      - "${SERVER_PORT:-8080}:${SERVER_PORT:-8080}"
+      # WebRTC UDP port range (adjust as needed)
+      - "49152-49252:49152-49252/udp"
+    env_file:
+      - .env
+    environment:
+      # Docker-specific overrides (these use container networking)
+      - SERVER_HOST=0.0.0.0
+      - RECORDING_OUTPUT_DIR=/app/recordings
+      - IPFS_API_URL=http://ipfs:5001
+      - IPFS_GATEWAY_URL=http://ipfs:8080/ipfs
+    volumes:
+      - ./data/recordings:/app/recordings
+    depends_on:
+      - ipfs
+    networks:
+      - sfu-network
+    restart: unless-stopped
+
+  ipfs:
+    image: ipfs/kubo:latest
+    container_name: ipfs
+    ports:
+      - "5001:5001"      # API
+      - "8081:8080"      # Gateway
+    volumes:
+      - ./data/ipfs:/data/ipfs
+      - ./data/ipfs-staging:/export
+    environment:
+      - IPFS_PROFILE=server
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        # Initialize IPFS if not already initialized
+        ipfs init --profile=server 2>/dev/null || true
+        # Remove all bootstrap nodes (no public network connections)
+        ipfs bootstrap rm --all
+        # Disable autonat and relay (no external connections)
+        ipfs config AutoNAT.ServiceMode disabled
+        ipfs config Swarm.RelayClient.Enabled false
+        ipfs config Swarm.RelayService.Enabled false
+        # Disable swarm listening on public addresses (won't accept incoming)
+        ipfs config --json Addresses.Swarm '[]'
+        # Start IPFS daemon (not offline, so gateway/webui work, but no peers to connect to)
+        ipfs daemon
+    networks:
+      - sfu-network
+    restart: unless-stopped
+
+networks:
+  sfu-network:
+    driver: bridge

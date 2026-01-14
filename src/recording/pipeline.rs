@@ -3,6 +3,7 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 use crate::error::SfuError;
@@ -25,8 +26,14 @@ impl RecordingPipeline {
         std::fs::create_dir_all(&room_dir)
             .map_err(|e| SfuError::Internal(format!("Failed to create recording directory: {}", e)))?;
 
-        // Output file: recordings/{room_id}/{peer_id}.webm
-        let output_path = room_dir.join(format!("{}.webm", peer_id));
+        // Generate timestamp for unique filename per session
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+
+        // Output file: recordings/{room_id}/{peer_id}_{timestamp}.webm
+        let output_path = room_dir.join(format!("{}_{}.webm", peer_id, timestamp));
 
         let pipeline = gst::Pipeline::new();
 

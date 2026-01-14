@@ -8,6 +8,7 @@ use serde_json::json;
 use std::io::{self, Write};
 use tokio::time::{sleep, timeout, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use urlencoding;
 
 #[derive(Parser)]
 #[command(name = "sfu-cli")]
@@ -16,6 +17,10 @@ struct Cli {
     /// Server URL (default: ws://127.0.0.1:8080)
     #[arg(short, long, default_value = "127.0.0.1:8080")]
     server: String,
+
+    /// IPFS API URL (default: http://localhost:5001)
+    #[arg(short, long, default_value = "http://localhost:5001")]
+    ipfs: String,
 
     #[command(subcommand)]
     command: Commands,
@@ -103,9 +108,9 @@ async fn main() {
         }
         Commands::Validate { all, scenario } => {
             if *all {
-                run_all_validations(&cli.server).await;
+                run_all_validations(&cli.server, &cli.ipfs).await;
             } else if let Some(s) = scenario {
-                run_scenario(&cli.server, s).await;
+                run_scenario(&cli.server, &cli.ipfs, s).await;
             } else {
                 println!("{}", "Use --all or --scenario <name>".yellow());
                 list_scenarios();
@@ -369,15 +374,21 @@ async fn join_room(server: &str, room_id: &str, peer_id: &str, name: Option<&str
 
 fn list_scenarios() {
     println!("\n{}", "Available Validation Scenarios:".bold());
+    println!("\n{}", "SFU Server:".bold().cyan());
     println!("  {} - Basic WebSocket connection test", "connection".cyan());
     println!("  {} - Room creation flow", "create-room".cyan());
     println!("  {} - Student join flow", "join-room".cyan());
     println!("  {} - Multiple students joining", "multi-student".cyan());
     println!("  {} - Invalid room join (error handling)", "invalid-room".cyan());
+    println!("\n{}", "IPFS:".bold().cyan());
+    println!("  {} - Check IPFS node connectivity", "ipfs-health".cyan());
+    println!("  {} - Upload test file to IPFS", "ipfs-upload".cyan());
+    println!("  {} - Verify MFS (Mutable File System)", "ipfs-mfs".cyan());
     println!("\nExample: sfu-cli validate --scenario connection");
+    println!("Example: sfu-cli validate --scenario ipfs-health");
 }
 
-async fn run_scenario(server: &str, scenario: &str) {
+async fn run_scenario(server: &str, ipfs_url: &str, scenario: &str) {
     println!("\n{} {}", "Running scenario:".bold(), scenario.cyan());
     println!("{}", "─".repeat(60));
 
@@ -387,6 +398,9 @@ async fn run_scenario(server: &str, scenario: &str) {
         "join-room" => validate_join_room(server).await,
         "multi-student" => validate_multi_student(server).await,
         "invalid-room" => validate_invalid_room(server).await,
+        "ipfs-health" => validate_ipfs_health(ipfs_url).await,
+        "ipfs-upload" => validate_ipfs_upload(ipfs_url).await,
+        "ipfs-mfs" => validate_ipfs_mfs(ipfs_url).await,
         _ => {
             println!("{} Unknown scenario: {}", "✗".red(), scenario);
             list_scenarios();
@@ -401,11 +415,11 @@ async fn run_scenario(server: &str, scenario: &str) {
     }
 }
 
-async fn run_all_validations(server: &str) {
+async fn run_all_validations(server: &str, ipfs_url: &str) {
     println!("\n{}", "Running All Validation Tests".bold().green());
     println!("{}\n", "═".repeat(60).green());
 
-    let scenarios = vec![
+    let sfu_scenarios = vec![
         "connection",
         "create-room",
         "join-room",
@@ -413,10 +427,18 @@ async fn run_all_validations(server: &str) {
         "invalid-room",
     ];
 
+    let ipfs_scenarios = vec![
+        "ipfs-health",
+        "ipfs-upload",
+        "ipfs-mfs",
+    ];
+
     let mut passed = 0;
     let mut failed = 0;
 
-    for scenario in scenarios {
+    // Run SFU scenarios
+    println!("{}", "SFU Server Tests".bold().cyan());
+    for scenario in sfu_scenarios {
         println!("\n{} Testing: {}", "▶".cyan(), scenario.bold());
         println!("{}", "─".repeat(60));
 
@@ -426,6 +448,28 @@ async fn run_all_validations(server: &str) {
             "join-room" => validate_join_room(server).await,
             "multi-student" => validate_multi_student(server).await,
             "invalid-room" => validate_invalid_room(server).await,
+            _ => false,
+        };
+
+        if result {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    }
+
+    // Run IPFS scenarios
+    println!("\n{}", "IPFS Tests".bold().cyan());
+    for scenario in ipfs_scenarios {
+        println!("\n{} Testing: {}", "▶".cyan(), scenario.bold());
+        println!("{}", "─".repeat(60));
+
+        let result = match scenario {
+            "ipfs-health" => validate_ipfs_health(ipfs_url).await,
+            "ipfs-upload" => validate_ipfs_upload(ipfs_url).await,
+            "ipfs-mfs" => validate_ipfs_mfs(ipfs_url).await,
             _ => false,
         };
 
@@ -511,93 +555,112 @@ async fn validate_create_room(server: &str) -> bool {
 }
 
 async fn validate_join_room(server: &str) -> bool {
-    println!("  Step 1: Creating room...");
+    println!("  Step 1: Creating room (proctor connects)...");
 
-    // First create a room
     let url = format!("ws://{}/sfu", server);
-    let room_id: Option<String> = match connect_async(&url).await {
-        Ok((ws_stream, _)) => {
-            let (mut write, mut read) = ws_stream.split();
 
-            let msg = json!({
-                "type": "CreateRoom",
-                "peer_id": "test_proctor_join",
-                "name": "Test",
-            });
-
-            match write.send(Message::Text(msg.to_string())).await {
-                Ok(_) => {
-                    if let Ok(Some(Ok(Message::Text(text)))) =
-                        timeout(Duration::from_secs(3), read.next()).await
-                    {
-                        if let Ok(response) = serde_json::from_str::<serde_json::Value>(&text) {
-                            if response["type"] == "RoomCreated" {
-                                response["room_id"].as_str().map(String::from)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                }
-                Err(_) => None,
-            }
+    // Connect proctor and keep connection alive
+    let proctor_conn = match connect_async(&url).await {
+        Ok((ws_stream, _)) => ws_stream,
+        Err(e) => {
+            println!("{} Proctor connection failed: {}", "✗".red(), e);
+            return false;
         }
-        Err(_) => None,
     };
 
-    if room_id.is_none() {
-        println!("{} Failed to create room", "✗".red());
+    let (mut proctor_write, mut proctor_read) = proctor_conn.split();
+
+    // Create room
+    let msg = json!({
+        "type": "CreateRoom",
+        "peer_id": "test_proctor_join",
+        "name": "Test Proctor",
+    });
+
+    if proctor_write.send(Message::Text(msg.to_string())).await.is_err() {
+        println!("{} Failed to send CreateRoom message", "✗".red());
         return false;
     }
 
-    let room_id = room_id.unwrap();
-    println!("  {} Room created: {}", "✓".green(), room_id);
-
-    // Now try to join
-    println!("  Step 2: Student joining room...");
-    match connect_async(&url).await {
-        Ok((ws_stream, _)) => {
-            let (mut write, mut read) = ws_stream.split();
-
-            let msg = json!({
-                "type": "JoinRequest",
-                "room_id": room_id,
-                "peer_id": "test_student_join",
-                "name": "Test Student",
-                "role": "student",
-            });
-
-            if write.send(Message::Text(msg.to_string())).await.is_err() {
-                println!("{} Failed to send join request", "✗".red());
-                return false;
+    let room_id = match timeout(Duration::from_secs(3), proctor_read.next()).await {
+        Ok(Some(Ok(Message::Text(text)))) => {
+            if let Ok(response) = serde_json::from_str::<serde_json::Value>(&text) {
+                if response["type"] == "RoomCreated" {
+                    response["room_id"].as_str().map(String::from)
+                } else {
+                    println!("{} Unexpected response: {}", "✗".yellow(), text);
+                    None
+                }
+            } else {
+                None
             }
+        }
+        _ => {
+            println!("{} No response received for CreateRoom", "✗".red());
+            None
+        }
+    };
 
-            match timeout(Duration::from_secs(3), read.next()).await {
-                Ok(Some(Ok(Message::Text(text)))) => {
-                    if let Ok(response) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if response["type"] == "join_request_sent" {
-                            println!("{} Join request sent successfully", "✓".green());
-                            return true;
-                        }
-                    }
+    let room_id = match room_id {
+        Some(id) => {
+            println!("  {} Room created: {}", "✓".green(), id);
+            id
+        }
+        None => {
+            println!("{} Failed to create room", "✗".red());
+            return false;
+        }
+    };
+
+    // Step 2: Student joins while proctor is still connected
+    println!("  Step 2: Student joining room...");
+
+    let student_conn = match connect_async(&url).await {
+        Ok((ws_stream, _)) => ws_stream,
+        Err(e) => {
+            println!("{} Student connection failed: {}", "✗".red(), e);
+            return false;
+        }
+    };
+
+    let (mut student_write, mut student_read) = student_conn.split();
+
+    let msg = json!({
+        "type": "JoinRequest",
+        "room_id": room_id,
+        "peer_id": "test_student_join",
+        "name": "Test Student",
+        "role": "student",
+    });
+
+    if student_write.send(Message::Text(msg.to_string())).await.is_err() {
+        println!("{} Failed to send join request", "✗".red());
+        return false;
+    }
+
+    let result = match timeout(Duration::from_secs(3), student_read.next()).await {
+        Ok(Some(Ok(Message::Text(text)))) => {
+            if let Ok(response) = serde_json::from_str::<serde_json::Value>(&text) {
+                if response["type"] == "join_request_sent" {
+                    println!("{} Join request sent successfully", "✓".green());
+                    true
+                } else {
                     println!("{} Unexpected response: {}", "✗".yellow(), text);
                     false
                 }
-                _ => {
-                    println!("{} No response received", "✗".red());
-                    false
-                }
+            } else {
+                println!("{} Failed to parse response", "✗".red());
+                false
             }
         }
-        Err(e) => {
-            println!("{} Connection failed: {}", "✗".red(), e);
+        _ => {
+            println!("{} No response received", "✗".red());
             false
         }
-    }
+    };
+
+    // Connections are dropped here, cleaning up proctor and student
+    result
 }
 
 async fn validate_multi_student(server: &str) -> bool {
@@ -605,54 +668,61 @@ async fn validate_multi_student(server: &str) -> bool {
 
     let url = format!("ws://{}/sfu", server);
 
-    // Create room
-    let room_id = match connect_async(&url).await {
-        Ok((ws_stream, _)) => {
-            let (mut write, mut read) = ws_stream.split();
-
-            let msg = json!({
-                "type": "CreateRoom",
-                "peer_id": "proctor_multi",
-                "name": "Multi Test",
-            });
-
-            match write.send(Message::Text(msg.to_string())).await {
-                Ok(_) => {
-                    if let Ok(Some(Ok(Message::Text(text)))) =
-                        timeout(Duration::from_secs(3), read.next()).await
-                    {
-                        if let Ok(response) = serde_json::from_str::<serde_json::Value>(&text) {
-                            response.get("room_id")
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                }
-                Err(_) => None,
-            }
+    // Connect proctor and keep connection alive
+    let proctor_conn = match connect_async(&url).await {
+        Ok((ws_stream, _)) => ws_stream,
+        Err(e) => {
+            println!("{} Proctor connection failed: {}", "✗".red(), e);
+            return false;
         }
-        Err(_) => None,
     };
 
-    if room_id.is_none() {
-        println!("{} Failed to create room", "✗".red());
+    let (mut proctor_write, mut proctor_read) = proctor_conn.split();
+
+    // Create room
+    let msg = json!({
+        "type": "CreateRoom",
+        "peer_id": "proctor_multi",
+        "name": "Multi Test",
+    });
+
+    if proctor_write.send(Message::Text(msg.to_string())).await.is_err() {
+        println!("{} Failed to send CreateRoom message", "✗".red());
         return false;
     }
 
-    let room_id = room_id.unwrap();
-    println!("  {} Room created: {}", "✓".green(), room_id);
+    let room_id = match timeout(Duration::from_secs(3), proctor_read.next()).await {
+        Ok(Some(Ok(Message::Text(text)))) => {
+            if let Ok(response) = serde_json::from_str::<serde_json::Value>(&text) {
+                response.get("room_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
 
-    // Try to add 3 students
+    let room_id = match room_id {
+        Some(id) => {
+            println!("  {} Room created: {}", "✓".green(), id);
+            id
+        }
+        None => {
+            println!("{} Failed to create room", "✗".red());
+            return false;
+        }
+    };
+
+    // Try to add 3 students while proctor stays connected
     let mut success_count = 0;
+
     for i in 1..=3 {
         println!("  Connecting student {}...", i);
 
         if let Ok((ws_stream, _)) = connect_async(&url).await {
-            let (mut write, _) = ws_stream.split();
+            let (mut write, mut read) = ws_stream.split();
 
             let msg = json!({
                 "type": "JoinRequest",
@@ -663,19 +733,31 @@ async fn validate_multi_student(server: &str) -> bool {
             });
 
             if write.send(Message::Text(msg.to_string())).await.is_ok() {
-                success_count += 1;
+                // Wait for response to verify join request was processed
+                if let Ok(Some(Ok(Message::Text(text)))) =
+                    timeout(Duration::from_secs(2), read.next()).await
+                {
+                    if let Ok(response) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if response["type"] == "join_request_sent" {
+                            success_count += 1;
+                            println!("    {} Student {} join request sent", "✓".green(), i);
+                        }
+                    }
+                }
             }
         }
 
-        sleep(Duration::from_millis(200)).await;
+        sleep(Duration::from_millis(100)).await;
     }
 
+    // Proctor connection is dropped here, cleaning up the room
+
     if success_count == 3 {
-        println!("{} All 3 students connected successfully", "✓".green());
+        println!("{} All 3 students join requests sent successfully", "✓".green());
         true
     } else {
         println!(
-            "{} Only {} out of 3 students connected",
+            "{} Only {} out of 3 students sent join requests",
             "✗".red(),
             success_count
         );
@@ -710,6 +792,157 @@ async fn validate_invalid_room(server: &str) -> bool {
         }
         Err(e) => {
             println!("{} Connection failed: {}", "✗".red(), e);
+            false
+        }
+    }
+}
+
+// ============================================================================
+// IPFS Validation Functions
+// ============================================================================
+
+async fn validate_ipfs_health(ipfs_url: &str) -> bool {
+    println!("  Checking IPFS node connectivity...");
+
+    let client = reqwest::Client::new();
+    let version_url = format!("{}/api/v0/version", ipfs_url);
+
+    match client.post(&version_url).send().await {
+        Ok(response) => {
+            if response.status().is_success() {
+                if let Ok(body) = response.json::<serde_json::Value>().await {
+                    let version = body["Version"].as_str().unwrap_or("unknown");
+                    println!("{} IPFS node is accessible", "✓".green());
+                    println!("  Version: {}", version);
+                    return true;
+                }
+                println!("{} IPFS node responded but couldn't parse version", "✓".green());
+                true
+            } else {
+                println!("{} IPFS API returned error: {}", "✗".red(), response.status());
+                false
+            }
+        }
+        Err(e) => {
+            println!("{} Cannot connect to IPFS: {}", "✗".red(), e);
+            println!("  Make sure IPFS is running at {}", ipfs_url);
+            false
+        }
+    }
+}
+
+async fn validate_ipfs_upload(ipfs_url: &str) -> bool {
+    println!("  Testing IPFS file upload...");
+
+    let client = reqwest::Client::new();
+    let add_url = format!("{}/api/v0/add", ipfs_url);
+
+    // Create a small test file content
+    let test_content = format!(
+        "SFU CLI IPFS Test - Timestamp: {}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+
+    // Create multipart form with test content
+    let form = reqwest::multipart::Form::new()
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(test_content.as_bytes().to_vec())
+                .file_name("sfu-cli-test.txt"),
+        );
+
+    match client.post(&add_url).multipart(form).send().await {
+        Ok(response) => {
+            if response.status().is_success() {
+                if let Ok(body) = response.json::<serde_json::Value>().await {
+                    let hash = body["Hash"].as_str().unwrap_or("unknown");
+                    let size = body["Size"].as_str().unwrap_or("unknown");
+                    println!("{} File uploaded successfully", "✓".green());
+                    println!("  CID: {}", hash);
+                    println!("  Size: {} bytes", size);
+                    return true;
+                }
+                println!("{} Upload succeeded but couldn't parse response", "✗".yellow());
+                false
+            } else {
+                let error = response.text().await.unwrap_or_default();
+                println!("{} Upload failed: {}", "✗".red(), error);
+                false
+            }
+        }
+        Err(e) => {
+            println!("{} Upload request failed: {}", "✗".red(), e);
+            false
+        }
+    }
+}
+
+async fn validate_ipfs_mfs(ipfs_url: &str) -> bool {
+    println!("  Testing IPFS MFS (Mutable File System)...");
+
+    let client = reqwest::Client::new();
+
+    // Step 1: Create a test directory
+    let test_dir = "/sfu-cli-test";
+    let mkdir_url = format!(
+        "{}/api/v0/files/mkdir?arg={}&parents=true",
+        ipfs_url,
+        urlencoding::encode(test_dir)
+    );
+
+    match client.post(&mkdir_url).send().await {
+        Ok(response) => {
+            if !response.status().is_success() {
+                let error = response.text().await.unwrap_or_default();
+                // Ignore "already exists" errors
+                if !error.contains("already has entry") && !error.is_empty() {
+                    println!("{} Failed to create MFS directory: {}", "✗".red(), error);
+                    return false;
+                }
+            }
+            println!("  {} Created test directory: {}", "✓".green(), test_dir);
+        }
+        Err(e) => {
+            println!("{} MFS mkdir request failed: {}", "✗".red(), e);
+            return false;
+        }
+    }
+
+    // Step 2: List the root directory
+    let ls_url = format!("{}/api/v0/files/ls?arg=/&long=true", ipfs_url);
+
+    match client.post(&ls_url).send().await {
+        Ok(response) => {
+            if response.status().is_success() {
+                if let Ok(body) = response.json::<serde_json::Value>().await {
+                    let entries = body["Entries"].as_array();
+                    let count = entries.map(|e| e.len()).unwrap_or(0);
+                    println!("  {} MFS listing successful ({} entries in root)", "✓".green(), count);
+
+                    // Check if recordings directory exists
+                    if let Some(entries) = entries {
+                        let has_recordings = entries.iter().any(|e| {
+                            e["Name"].as_str() == Some("recordings")
+                        });
+                        if has_recordings {
+                            println!("  {} Found /recordings directory", "✓".green());
+                        }
+                    }
+                    return true;
+                }
+                println!("{} MFS listing succeeded but couldn't parse response", "✗".yellow());
+                false
+            } else {
+                let error = response.text().await.unwrap_or_default();
+                println!("{} MFS listing failed: {}", "✗".red(), error);
+                false
+            }
+        }
+        Err(e) => {
+            println!("{} MFS ls request failed: {}", "✗".red(), e);
             false
         }
     }

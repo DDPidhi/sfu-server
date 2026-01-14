@@ -41,6 +41,7 @@ sfu-cli [OPTIONS] <COMMAND>
 ### Global Options
 
 - `-s, --server <SERVER>` - Server address (default: `127.0.0.1:8080`)
+- `-i, --ipfs <IPFS_URL>` - IPFS API URL (default: `http://localhost:5001`)
 - `-h, --help` - Show help information
 
 ### Commands
@@ -300,15 +301,23 @@ sfu-cli validate --scenario <SCENARIO_NAME>
 ```
 
 **Available Scenarios:**
+
+*SFU Server:*
 - `connection` - Basic WebSocket connection test
 - `create-room` - Room creation flow
 - `join-room` - Student join flow
 - `multi-student` - Multiple students joining
 - `invalid-room` - Invalid room join (error handling)
 
+*IPFS:*
+- `ipfs-health` - Check IPFS node connectivity
+- `ipfs-upload` - Upload test file to IPFS
+- `ipfs-mfs` - Verify MFS (Mutable File System)
+
 **Example:**
 ```bash
 sfu-cli validate --scenario connection
+sfu-cli validate --scenario ipfs-health
 ```
 
 ### 7. Interactive Mode
@@ -404,10 +413,31 @@ sfu-cli health && sfu-cli connect
 
 ### 2. Full System Validation
 
-Run all automated tests:
+Run all automated tests (SFU + IPFS):
 
 ```bash
 sfu-cli validate --all
+```
+
+### 3. IPFS-Only Validation
+
+Test IPFS connectivity and functionality:
+
+```bash
+# Check IPFS health
+sfu-cli validate --scenario ipfs-health
+
+# Test file upload
+sfu-cli validate --scenario ipfs-upload
+
+# Verify MFS
+sfu-cli validate --scenario ipfs-mfs
+```
+
+For Docker environments, specify the IPFS URL:
+
+```bash
+sfu-cli --ipfs http://ipfs:5001 validate --scenario ipfs-health
 ```
 
 ### 3. Manual Room Testing

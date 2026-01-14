@@ -137,11 +137,21 @@ impl IpfsClient {
             SfuError::IpfsUploadFailed(format!("Failed to parse response: {}", e))
         })?;
 
-        let gateway_url = format!("{}/{}", self.config.gateway_url, ipfs_response.hash);
+        let cid = &ipfs_response.hash;
+        let gateway_url = format!("{}/{}", self.config.gateway_url, cid);
         let size: u64 = ipfs_response.size.parse().unwrap_or(0);
 
+        // Copy file to MFS so it shows up in the Web UI
+        if let Err(e) = self.copy_to_mfs(cid, room_id, &file_name).await {
+            tracing::warn!(
+                cid = %cid,
+                error = %e,
+                "Failed to copy file to MFS (file is still accessible via CID)"
+            );
+        }
+
         tracing::info!(
-            cid = %ipfs_response.hash,
+            cid = %cid,
             size = size,
             room_id = %room_id,
             peer_id = %peer_id,
@@ -150,10 +160,53 @@ impl IpfsClient {
         );
 
         Ok(IpfsUploadResult {
-            cid: ipfs_response.hash,
+            cid: cid.clone(),
             gateway_url,
             size,
         })
+    }
+
+    /// Copy a file to MFS (Mutable File System) so it appears in the Web UI
+    async fn copy_to_mfs(&self, cid: &str, room_id: &str, file_name: &str) -> Result<()> {
+        // Create the directory structure: /recordings/{room_id}/
+        let mfs_dir = format!("/recordings/{}", room_id);
+        let mkdir_url = format!(
+            "{}/api/v0/files/mkdir?arg={}&parents=true",
+            self.config.api_url,
+            urlencoding::encode(&mfs_dir)
+        );
+
+        // Create directory (ignore error if already exists)
+        let _ = self.client.post(&mkdir_url).send().await;
+
+        // Copy file from IPFS to MFS: /recordings/{room_id}/{file_name}
+        let mfs_path = format!("{}/{}", mfs_dir, file_name);
+        let cp_url = format!(
+            "{}/api/v0/files/cp?arg=/ipfs/{}&arg={}",
+            self.config.api_url,
+            cid,
+            urlencoding::encode(&mfs_path)
+        );
+
+        let response = self.client.post(&cp_url).send().await.map_err(|e| {
+            SfuError::Internal(format!("Failed to copy to MFS: {}", e))
+        })?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            // Ignore "file already exists" errors
+            if !error_text.contains("already has entry") {
+                return Err(SfuError::Internal(format!("MFS copy failed: {}", error_text)));
+            }
+        }
+
+        tracing::debug!(
+            cid = %cid,
+            mfs_path = %mfs_path,
+            "Copied file to MFS"
+        );
+
+        Ok(())
     }
 
     /// Check if IPFS node is reachable
