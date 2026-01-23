@@ -4,3 +4,9 @@
 
 # Docker data directories
 /data/
+
+# Contracts (Hardhat)
+contracts/*/node_modules/
+contracts/*/artifacts/
+contracts/*/cache/
+contracts/*/.env

@@ -1,0 +1,20 @@
+{
+  "name": "proctoring",
+  "version": "1.0.0",
+  "description": "Proctoring smart contract for Moonbase Alpha",
+  "scripts": {
+    "compile": "hardhat compile",
+    "deploy": "hardhat run scripts/deploy.js --network moonbaseAlpha",
+    "deploy:local": "hardhat run scripts/deploy.js --network localhost",
+    "test": "hardhat test",
+    "test:contract": "hardhat run scripts/test-contract.js --network moonbaseAlpha"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "dotenv": "^16.3.1",
+    "hardhat": "^2.22.0"
+  }
+}
