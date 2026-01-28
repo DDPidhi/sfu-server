@@ -21,6 +21,8 @@ pub enum SfuMessage {
     CreateRoom {
         peer_id: String,
         name: Option<String>,
+        /// Wallet address of the proctor (for on-chain recording)
+        wallet_address: Option<String>,
     },
 
     RoomCreated {
@@ -32,6 +34,8 @@ pub enum SfuMessage {
         peer_id: String,
         name: Option<String>,
         role: String,
+        /// Wallet address of the participant (for on-chain recording and NFT generation)
+        wallet_address: Option<String>,
     },
 
     JoinResponse {
@@ -46,6 +50,8 @@ pub enum SfuMessage {
         peer_id: String,
         name: Option<String>,
         role: String,
+        /// Wallet address of the participant (for on-chain recording and NFT generation)
+        wallet_address: Option<String>,
     },
 
     Leave {
@@ -125,6 +131,69 @@ pub enum SfuMessage {
         room_id: String,
         recording_peers: Vec<String>,
     },
+
+    // Proctor action messages
+    KickParticipant {
+        room_id: String,
+        peer_id: String,
+        reason: Option<String>,
+    },
+
+    ParticipantKicked {
+        room_id: String,
+        peer_id: String,
+        reason: Option<String>,
+    },
+
+    /// Sent to proctor when a participant voluntarily leaves the room
+    ParticipantLeft {
+        room_id: String,
+        peer_id: String,
+        name: Option<String>,
+    },
+
+    // ID verification messages
+    StartIdVerification {
+        room_id: String,
+        peer_id: String,
+    },
+
+    IdVerificationResult {
+        room_id: String,
+        peer_id: String,
+        status: String, // "valid", "invalid", "pending", "skipped"
+        verified_by: String,
+    },
+
+    // Suspicious activity messages
+    ReportSuspiciousActivity {
+        room_id: String,
+        peer_id: String,
+        activity_type: String, // "multiple_devices", "tab_switch", "window_blur", "screen_share", "unauthorized_person", "audio_anomaly", "other"
+        details: Option<String>,
+    },
+
+    SuspiciousActivityReported {
+        room_id: String,
+        peer_id: String,
+        activity_type: String,
+    },
+
+    /// Sent by student when they complete an exam with their score
+    SubmitExamResult {
+        room_id: String,
+        peer_id: String,
+        score: u64,      // Score achieved (e.g., 85 for 85%)
+        total: u64,      // Total possible (e.g., 100)
+        exam_name: Option<String>,
+    },
+
+    /// Confirmation sent back to student after exam result is recorded
+    ExamResultSubmitted {
+        room_id: String,
+        peer_id: String,
+        grade: u64,      // Grade in basis points (8500 = 85.00%)
+    },
 }
 
 pub struct SfuSignalingHandler {
@@ -149,14 +218,14 @@ impl SfuSignalingHandler {
 
     pub async fn handle_message(&mut self, message: SfuMessage) {
         match message {
-            SfuMessage::CreateRoom { peer_id, name } => {
-                self.handle_create_room(peer_id, name).await;
+            SfuMessage::CreateRoom { peer_id, name, wallet_address } => {
+                self.handle_create_room(peer_id, name, wallet_address).await;
             }
-            SfuMessage::Join { room_id, peer_id, name, role } => {
-                self.handle_join(room_id, peer_id, name, role).await;
+            SfuMessage::Join { room_id, peer_id, name, role, wallet_address } => {
+                self.handle_join(room_id, peer_id, name, role, wallet_address).await;
             }
-            SfuMessage::JoinRequest { room_id, peer_id, name, role } => {
-                self.handle_join_request(room_id, peer_id, name, role).await;
+            SfuMessage::JoinRequest { room_id, peer_id, name, role, wallet_address } => {
+                self.handle_join_request(room_id, peer_id, name, role, wallet_address).await;
             }
             SfuMessage::JoinResponse { room_id, peer_id, approved, requester_peer_id } => {
                 self.handle_join_response(room_id, peer_id, approved, requester_peer_id).await;
@@ -190,16 +259,31 @@ impl SfuSignalingHandler {
             SfuMessage::GetRecordingStatus { room_id } => {
                 self.handle_get_recording_status(room_id).await;
             }
+            SfuMessage::KickParticipant { room_id, peer_id, reason } => {
+                self.handle_kick_participant(room_id, peer_id, reason).await;
+            }
+            SfuMessage::StartIdVerification { room_id, peer_id } => {
+                self.handle_start_id_verification(room_id, peer_id).await;
+            }
+            SfuMessage::IdVerificationResult { room_id, peer_id, status, verified_by } => {
+                self.handle_id_verification_result(room_id, peer_id, status, verified_by).await;
+            }
+            SfuMessage::ReportSuspiciousActivity { room_id, peer_id, activity_type, details } => {
+                self.handle_report_suspicious_activity(room_id, peer_id, activity_type, details).await;
+            }
+            SfuMessage::SubmitExamResult { room_id, peer_id, score, total, exam_name } => {
+                self.handle_submit_exam_result(room_id, peer_id, score, total, exam_name).await;
+            }
             _ => {
                 tracing::warn!("Unhandled SFU message type");
             }
         }
     }
 
-    async fn handle_create_room(&mut self, peer_id: String, name: Option<String>) {
-        tracing::info!(peer_id = %peer_id, name = ?name, "Proctor creating room");
+    async fn handle_create_room(&mut self, peer_id: String, name: Option<String>, wallet_address: Option<String>) {
+        tracing::info!(peer_id = %peer_id, name = ?name, wallet = ?wallet_address, "Proctor creating room");
 
-        match self.sfu_server.create_room(peer_id.clone(), name).await {
+        match self.sfu_server.create_room(peer_id.clone(), name, wallet_address).await {
             Ok(room_id) => {
                 self.peer_id = Some(peer_id.clone());
                 self.room_id = Some(room_id.clone());
@@ -224,12 +308,13 @@ impl SfuSignalingHandler {
         }
     }
 
-    async fn handle_join(&mut self, room_id: String, peer_id: String, name: Option<String>, role: String) {
+    async fn handle_join(&mut self, room_id: String, peer_id: String, name: Option<String>, role: String, wallet_address: Option<String>) {
         tracing::info!(
             role = %role,
             peer_id = %peer_id,
             room_id = %room_id,
             name = ?name,
+            wallet = ?wallet_address,
             "Peer joining room"
         );
 
@@ -238,8 +323,8 @@ impl SfuSignalingHandler {
 
         self.sfu_server.remove_pending_student(&peer_id).await;
 
-        // Add peer to SFU with role
-        if let Err(e) = self.sfu_server.add_peer_with_role(peer_id.clone(), room_id, role, name, self.sender.clone()).await {
+        // Add peer to SFU with role and wallet address
+        if let Err(e) = self.sfu_server.add_peer_with_role(peer_id.clone(), room_id, role, name, wallet_address, self.sender.clone()).await {
             tracing::error!(peer_id = %peer_id, error = %e, "Failed to add peer to SFU");
             self.send_error(&format!("Failed to join: {}", e)).await;
         } else {
@@ -247,21 +332,22 @@ impl SfuSignalingHandler {
         }
     }
 
-    async fn handle_join_request(&mut self, room_id: String, peer_id: String, name: Option<String>, role: String) {
+    async fn handle_join_request(&mut self, room_id: String, peer_id: String, name: Option<String>, role: String, wallet_address: Option<String>) {
         tracing::info!(
             peer_id = %peer_id,
             room_id = %room_id,
             name = ?name,
+            wallet = ?wallet_address,
             "Student requesting to join room"
         );
 
         self.peer_id = Some(peer_id.clone());
         self.room_id = Some(room_id.clone());
 
-        self.sfu_server.track_pending_student(peer_id.clone(), self.sender.clone()).await;
+        self.sfu_server.track_pending_student(peer_id.clone(), wallet_address.clone(), self.sender.clone()).await;
 
         // Forward the join request to the proctor (but don't add connection to SFU yet)
-        if let Err(e) = self.sfu_server.forward_join_request(room_id, peer_id, name, role).await {
+        if let Err(e) = self.sfu_server.forward_join_request(room_id, peer_id, name, role, wallet_address).await {
             tracing::error!(error = %e, "Failed to forward join request");
             self.send_error(&format!("Failed to send join request: {}", e)).await;
         } else {
@@ -424,6 +510,155 @@ impl SfuSignalingHandler {
         }
     }
 
+    async fn handle_kick_participant(&self, room_id: String, peer_id: String, reason: Option<String>) {
+        tracing::info!(
+            room_id = %room_id,
+            peer_id = %peer_id,
+            reason = ?reason,
+            "Proctor kicking participant"
+        );
+
+        // Notify the kicked participant
+        if let Err(e) = self.sfu_server.send_kick_notification(&room_id, &peer_id, reason.clone()).await {
+            tracing::error!(
+                room_id = %room_id,
+                peer_id = %peer_id,
+                error = %e,
+                "Failed to send kick notification"
+            );
+        }
+
+        // Remove the participant from the room
+        if let Err(e) = self.sfu_server.remove_peer(&peer_id).await {
+            tracing::error!(
+                peer_id = %peer_id,
+                error = %e,
+                "Failed to remove kicked peer"
+            );
+        }
+
+        // Emit chain event for the kick (handled by SfuServer)
+        self.sfu_server.emit_participant_kicked(&room_id, &peer_id, reason).await;
+    }
+
+    async fn handle_start_id_verification(&self, room_id: String, peer_id: String) {
+        tracing::info!(
+            room_id = %room_id,
+            peer_id = %peer_id,
+            "Starting ID verification"
+        );
+
+        // Forward the verification request to the participant
+        if let Err(e) = self.sfu_server.send_verification_request(&room_id, &peer_id).await {
+            tracing::error!(
+                room_id = %room_id,
+                peer_id = %peer_id,
+                error = %e,
+                "Failed to send verification request"
+            );
+        }
+    }
+
+    async fn handle_id_verification_result(
+        &self,
+        room_id: String,
+        peer_id: String,
+        status: String,
+        verified_by: String,
+    ) {
+        tracing::info!(
+            room_id = %room_id,
+            peer_id = %peer_id,
+            status = %status,
+            verified_by = %verified_by,
+            "ID verification result"
+        );
+
+        // Emit chain event for verification
+        self.sfu_server.emit_id_verification(&room_id, &peer_id, &status, &verified_by).await;
+
+        // Notify the participant of verification result
+        if let Err(e) = self.sfu_server.send_verification_result(&room_id, &peer_id, &status).await {
+            tracing::error!(
+                room_id = %room_id,
+                peer_id = %peer_id,
+                error = %e,
+                "Failed to send verification result"
+            );
+        }
+    }
+
+    async fn handle_report_suspicious_activity(
+        &self,
+        room_id: String,
+        peer_id: String,
+        activity_type: String,
+        details: Option<String>,
+    ) {
+        tracing::warn!(
+            room_id = %room_id,
+            peer_id = %peer_id,
+            activity_type = %activity_type,
+            details = ?details,
+            "Suspicious activity reported"
+        );
+
+        // Emit chain event for suspicious activity
+        self.sfu_server.emit_suspicious_activity(&room_id, &peer_id, &activity_type, details.clone()).await;
+
+        // Acknowledge the report
+        let message = SfuMessage::SuspiciousActivityReported {
+            room_id,
+            peer_id,
+            activity_type,
+        };
+        if let Ok(msg_str) = serde_json::to_string(&message) {
+            let _ = self.sender.send(Message::text(msg_str));
+        }
+    }
+
+    async fn handle_submit_exam_result(
+        &self,
+        room_id: String,
+        peer_id: String,
+        score: u64,
+        total: u64,
+        exam_name: Option<String>,
+    ) {
+        // Calculate grade in basis points (e.g., 85% = 8500)
+        let grade = if total > 0 {
+            (score * 10000) / total
+        } else {
+            0
+        };
+
+        let exam_name = exam_name.unwrap_or_else(|| format!("Exam Session {}", room_id));
+
+        tracing::info!(
+            room_id = %room_id,
+            peer_id = %peer_id,
+            score = score,
+            total = total,
+            grade = grade,
+            exam_name = %exam_name,
+            "Student submitted exam result"
+        );
+
+        // Store the grade for when the student leaves
+        self.sfu_server.set_exam_grade(&peer_id, grade, exam_name).await;
+
+        // Send confirmation back to student
+        let message = SfuMessage::ExamResultSubmitted {
+            room_id,
+            peer_id,
+            grade,
+        };
+
+        if let Ok(msg_str) = serde_json::to_string(&message) {
+            let _ = self.sender.send(Message::text(msg_str));
+        }
+    }
+
     async fn send_join_success(&self) {
         let message = serde_json::json!({
             "type": "join_success",
@@ -474,23 +709,26 @@ mod tests {
         let msg = SfuMessage::CreateRoom {
             peer_id: "proctor_123".to_string(),
             name: Some("Dr. Smith".to_string()),
+            wallet_address: Some("0x1234567890abcdef1234567890abcdef12345678".to_string()),
         };
 
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("CreateRoom"));
         assert!(json.contains("proctor_123"));
         assert!(json.contains("Dr. Smith"));
+        assert!(json.contains("0x1234567890abcdef"));
     }
 
     #[test]
     fn test_deserialize_create_room() {
-        let json = r#"{"type":"CreateRoom","peer_id":"proctor_123","name":"Dr. Smith"}"#;
+        let json = r#"{"type":"CreateRoom","peer_id":"proctor_123","name":"Dr. Smith","wallet_address":"0x1234"}"#;
         let msg: SfuMessage = serde_json::from_str(json).unwrap();
 
         match msg {
-            SfuMessage::CreateRoom { peer_id, name } => {
+            SfuMessage::CreateRoom { peer_id, name, wallet_address } => {
                 assert_eq!(peer_id, "proctor_123");
                 assert_eq!(name, Some("Dr. Smith".to_string()));
+                assert_eq!(wallet_address, Some("0x1234".to_string()));
             }
             _ => panic!("Wrong message type"),
         }
@@ -503,25 +741,28 @@ mod tests {
             peer_id: "student_789".to_string(),
             name: Some("John Doe".to_string()),
             role: "student".to_string(),
+            wallet_address: Some("0xabcdef".to_string()),
         };
 
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("Join"));
         assert!(json.contains("123456"));
         assert!(json.contains("student_789"));
+        assert!(json.contains("0xabcdef"));
     }
 
     #[test]
     fn test_deserialize_join() {
-        let json = r#"{"type":"Join","room_id":"123456","peer_id":"student_789","name":"John Doe","role":"student"}"#;
+        let json = r#"{"type":"Join","room_id":"123456","peer_id":"student_789","name":"John Doe","role":"student","wallet_address":"0xabcdef"}"#;
         let msg: SfuMessage = serde_json::from_str(json).unwrap();
 
         match msg {
-            SfuMessage::Join { room_id, peer_id, name, role } => {
+            SfuMessage::Join { room_id, peer_id, name, role, wallet_address } => {
                 assert_eq!(room_id, "123456");
                 assert_eq!(peer_id, "student_789");
                 assert_eq!(name, Some("John Doe".to_string()));
                 assert_eq!(role, "student");
+                assert_eq!(wallet_address, Some("0xabcdef".to_string()));
             }
             _ => panic!("Wrong message type"),
         }

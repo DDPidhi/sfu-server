@@ -2,12 +2,23 @@ use std::sync::Arc;
 use warp::Filter;
 
 use crate::sfu::SfuServer;
+use crate::substrate::EventQueue;
 use super::sfu_websocket;
 
 
-pub fn sfu_websocket_route() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-    let sfu_server = Arc::new(SfuServer::new());
+/// Creates the SFU WebSocket route with optional blockchain integration
+pub fn sfu_websocket_route_with_queue(
+    event_queue: Option<EventQueue>,
+) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    let mut sfu_server = SfuServer::new();
 
+    // Set up blockchain event queue if available
+    if let Some(queue) = event_queue {
+        sfu_server.set_event_queue(queue);
+        tracing::info!("SFU server configured with blockchain integration");
+    }
+
+    let sfu_server = Arc::new(sfu_server);
     sfu_server.clone().start_track_processing();
 
     warp::path("sfu")
@@ -18,6 +29,11 @@ pub fn sfu_websocket_route() -> impl Filter<Extract = impl warp::Reply, Error = 
                 sfu_websocket::handle_sfu_websocket(websocket, sfu_server)
             })
         })
+}
+
+/// Creates the SFU WebSocket route without blockchain integration
+pub fn sfu_websocket_route() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    sfu_websocket_route_with_queue(None)
 }
 
 pub fn sfu_health_check() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {

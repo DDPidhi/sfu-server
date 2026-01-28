@@ -33,3 +33,7 @@ gstreamer-video = "0.22"
 gstreamer-audio = "0.22"
 gstreamer-pbutils = "0.22"
 urlencoding = "2.1"
+
+# Asset Hub EVM interaction
+ethers = { version = "2.0", features = ["rustls", "ws"] }
+hex = "0.4"

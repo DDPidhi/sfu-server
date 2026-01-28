@@ -119,7 +119,8 @@ impl RoomManager {
     }
 
     /// Remove a peer from their room
-    pub async fn remove_peer(&self, peer_id: &str) -> Option<(String, PeerRole)> {
+    /// Returns (room_id, role, name) if peer was found
+    pub async fn remove_peer(&self, peer_id: &str) -> Option<(String, PeerRole, Option<String>)> {
         let mut peers = self.peers.write().await;
 
         if let Some(peer) = peers.remove(peer_id) {
@@ -155,7 +156,7 @@ impl RoomManager {
                 }
             }
 
-            return Some((peer.room_id, peer.role));
+            return Some((peer.room_id, peer.role, peer.name));
         }
 
         None

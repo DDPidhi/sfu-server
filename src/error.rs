@@ -113,6 +113,22 @@ pub enum SfuError {
     #[error("IPFS node not reachable")]
     IpfsNodeUnavailable,
 
+    /// Substrate/Aleph Zero errors
+    #[error("Failed to connect to Substrate node: {0}")]
+    SubstrateConnection(String),
+
+    #[error("Substrate configuration error: {0}")]
+    SubstrateConfig(String),
+
+    #[error("Contract call failed: {0}")]
+    ContractCallFailed(String),
+
+    #[error("Transaction submission failed: {0}")]
+    TransactionFailed(String),
+
+    #[error("Contract not found at address: {0}")]
+    ContractNotFound(String),
+
     /// Generic errors
     #[error("Internal server error: {0}")]
     Internal(String),

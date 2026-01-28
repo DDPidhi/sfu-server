@@ -4,6 +4,7 @@ mod api;
 mod error;
 mod recording;
 mod ipfs;
+mod substrate;
 
 use warp::Filter;
 use config::Config;
@@ -31,7 +32,19 @@ async fn main() {
         "Server configuration loaded"
     );
 
-    let routes = api::sfu_routes::sfu_websocket_route()
+    // Initialize Asset Hub EVM blockchain integration if configured
+    let event_queue = match substrate::init_from_env().await {
+        Some((_client, queue)) => {
+            tracing::info!("Asset Hub EVM blockchain integration enabled");
+            Some(queue)
+        }
+        None => {
+            tracing::info!("Asset Hub EVM blockchain integration disabled");
+            None
+        }
+    };
+
+    let routes = api::sfu_routes::sfu_websocket_route_with_queue(event_queue)
         .or(api::sfu_routes::sfu_health_check())
         .or(api::sfu_routes::sfu_config_endpoint());
 
