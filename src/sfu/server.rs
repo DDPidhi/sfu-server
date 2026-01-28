@@ -67,6 +67,17 @@ impl SfuServer {
         let recording_output_dir = std::env::var("RECORDING_OUTPUT_DIR")
             .unwrap_or_else(|_| "./recordings".to_string());
 
+        let recording_enabled = std::env::var("RECORDING_ENABLED")
+            .unwrap_or_else(|_| "true".to_string())
+            .parse()
+            .unwrap_or(true);
+
+        if recording_enabled {
+            tracing::info!("Recording enabled");
+        } else {
+            tracing::info!("Recording disabled");
+        }
+
         // Initialize IPFS client if configured
         let ipfs_client = IpfsConfig::from_env().and_then(|config| {
             match IpfsClient::new(config) {
@@ -94,7 +105,7 @@ impl SfuServer {
             peers_with_tracks: Arc::new(RwLock::new(HashMap::new())),
             pending_renegotiations: Arc::new(RwLock::new(HashMap::new())),
             pending_ice_candidates: Arc::new(RwLock::new(HashMap::new())),
-            recording_manager: Arc::new(RecordingManager::new(&recording_output_dir, ipfs_client)),
+            recording_manager: Arc::new(RecordingManager::new(&recording_output_dir, ipfs_client, recording_enabled)),
             event_queue: None,
         };
 

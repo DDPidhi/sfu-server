@@ -23,22 +23,41 @@ pub struct RecordingManager {
     recordings: Arc<RwLock<HashMap<RecordingKey, Arc<RecordingPipeline>>>>,
     output_dir: String,
     ipfs_client: Option<Arc<IpfsClient>>,
+    enabled: bool,
 }
 
 impl RecordingManager {
-    pub fn new(output_dir: &str, ipfs_client: Option<Arc<IpfsClient>>) -> Self {
-        // Create output directory if it doesn't exist
-        std::fs::create_dir_all(output_dir).ok();
+    pub fn new(output_dir: &str, ipfs_client: Option<Arc<IpfsClient>>, enabled: bool) -> Self {
+        // Create output directory if it doesn't exist (only if enabled)
+        if enabled {
+            std::fs::create_dir_all(output_dir).ok();
+        }
 
         Self {
             recordings: Arc::new(RwLock::new(HashMap::new())),
             output_dir: output_dir.to_string(),
             ipfs_client,
+            enabled,
         }
+    }
+
+    /// Check if recording is enabled
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Start recording for a specific peer in a room
     pub async fn start_recording(&self, room_id: &str, peer_id: &str) -> Result<(), SfuError> {
+        // Skip if recording is disabled
+        if !self.enabled {
+            tracing::debug!(
+                room_id = %room_id,
+                peer_id = %peer_id,
+                "Recording disabled, skipping"
+            );
+            return Ok(());
+        }
+
         let mut recordings = self.recordings.write().await;
         let key = (room_id.to_string(), peer_id.to_string());
 
