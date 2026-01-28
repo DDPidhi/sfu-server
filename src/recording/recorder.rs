@@ -287,3 +287,145 @@ impl RecordingManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_recording_result_debug() {
+        let result = RecordingResult {
+            file_path: PathBuf::from("/tmp/test.webm"),
+            cid: Some("QmTest123".to_string()),
+            ipfs_gateway_url: Some("http://localhost:8080/ipfs/QmTest123".to_string()),
+        };
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("test.webm"));
+        assert!(debug_str.contains("QmTest123"));
+    }
+
+    #[test]
+    fn test_recording_result_clone() {
+        let result = RecordingResult {
+            file_path: PathBuf::from("/tmp/test.webm"),
+            cid: Some("QmTest123".to_string()),
+            ipfs_gateway_url: Some("http://localhost:8080/ipfs/QmTest123".to_string()),
+        };
+        let cloned = result.clone();
+        assert_eq!(result.file_path, cloned.file_path);
+        assert_eq!(result.cid, cloned.cid);
+        assert_eq!(result.ipfs_gateway_url, cloned.ipfs_gateway_url);
+    }
+
+    #[test]
+    fn test_recording_result_without_ipfs() {
+        let result = RecordingResult {
+            file_path: PathBuf::from("/tmp/test.webm"),
+            cid: None,
+            ipfs_gateway_url: None,
+        };
+        assert!(result.cid.is_none());
+        assert!(result.ipfs_gateway_url.is_none());
+    }
+
+    #[test]
+    fn test_recording_key_type() {
+        let key: RecordingKey = ("room1".to_string(), "peer1".to_string());
+        assert_eq!(key.0, "room1");
+        assert_eq!(key.1, "peer1");
+    }
+
+    #[tokio::test]
+    async fn test_recording_manager_disabled() {
+        let manager = RecordingManager::new("/tmp/test_recordings", None, false);
+        assert!(!manager.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn test_recording_manager_enabled() {
+        let manager = RecordingManager::new("/tmp/test_recordings", None, true);
+        assert!(manager.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn test_start_recording_when_disabled() {
+        let manager = RecordingManager::new("/tmp/test_recordings", None, false);
+
+        // Starting recording when disabled should succeed silently
+        let result = manager.start_recording("room1", "peer1").await;
+        assert!(result.is_ok());
+
+        // Should not actually create a recording
+        assert!(!manager.is_recording("room1", "peer1").await);
+    }
+
+    #[tokio::test]
+    async fn test_is_recording_no_recordings() {
+        let manager = RecordingManager::new("/tmp/test_recordings", None, false);
+        assert!(!manager.is_recording("room1", "peer1").await);
+    }
+
+    #[tokio::test]
+    async fn test_is_room_recording_no_recordings() {
+        let manager = RecordingManager::new("/tmp/test_recordings", None, false);
+        assert!(!manager.is_room_recording("room1").await);
+    }
+
+    #[tokio::test]
+    async fn test_get_recording_peers_empty() {
+        let manager = RecordingManager::new("/tmp/test_recordings", None, false);
+        let peers = manager.get_recording_peers("room1").await;
+        assert!(peers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_recording_state_none() {
+        let manager = RecordingManager::new("/tmp/test_recordings", None, false);
+        let state = manager.get_recording_state("room1", "peer1").await;
+        assert!(state.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stop_recording_not_found() {
+        let manager = RecordingManager::new("/tmp/test_recordings", None, true);
+        let result = manager.stop_recording("room1", "peer1").await;
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        let err_msg = format!("{}", err);
+        assert!(err_msg.contains("No recording found"));
+    }
+
+    #[tokio::test]
+    async fn test_stop_all_recordings_empty_room() {
+        let manager = RecordingManager::new("/tmp/test_recordings", None, false);
+        let stopped = manager.stop_all_recordings_in_room("room1").await;
+        assert!(stopped.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_peer_no_recording() {
+        let manager = RecordingManager::new("/tmp/test_recordings", None, false);
+        // Should not panic when cleaning up a non-existent recording
+        manager.cleanup_peer("room1", "peer1").await;
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_room_empty() {
+        let manager = RecordingManager::new("/tmp/test_recordings", None, false);
+        // Should not panic when cleaning up an empty room
+        manager.cleanup_room("room1").await;
+    }
+
+    #[tokio::test]
+    async fn test_push_rtp_no_recording() {
+        let manager = RecordingManager::new("/tmp/test_recordings", None, false);
+
+        // Pushing RTP to non-existent recording should succeed silently
+        let video_result = manager.push_video_rtp("room1", "peer1", &[0, 1, 2, 3]).await;
+        assert!(video_result.is_ok());
+
+        let audio_result = manager.push_audio_rtp("room1", "peer1", &[0, 1, 2, 3]).await;
+        assert!(audio_result.is_ok());
+    }
+}

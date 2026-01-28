@@ -572,4 +572,257 @@ mod tests {
         assert!(debug_str.contains("AddRecordingsToResult"));
         assert!(debug_str.contains("QmCid1"));
     }
+
+    #[test]
+    fn test_result_level_dependency_keys() {
+        let add_recording = ChainEvent::AddRecordingToResult {
+            result_id: 42,
+            ipfs_cid: "QmTest".to_string(),
+        };
+        assert_eq!(add_recording.dependency_key(), Some("result:42".to_string()));
+
+        let update_grade = ChainEvent::UpdateExamResultGrade {
+            result_id: 42,
+            new_grade: 9000,
+        };
+        assert_eq!(update_grade.dependency_key(), Some("result:42".to_string()));
+
+        let mark_nft = ChainEvent::MarkNftMinted { result_id: 42 };
+        assert_eq!(mark_nft.dependency_key(), Some("result:42".to_string()));
+    }
+
+    #[test]
+    fn test_result_events_no_room_dependency() {
+        let add_recording = ChainEvent::AddRecordingToResult {
+            result_id: 1,
+            ipfs_cid: "QmTest".to_string(),
+        };
+        assert!(add_recording.room_dependency().is_none());
+
+        let update_grade = ChainEvent::UpdateExamResultGrade {
+            result_id: 1,
+            new_grade: 9000,
+        };
+        assert!(update_grade.room_dependency().is_none());
+
+        let mark_nft = ChainEvent::MarkNftMinted { result_id: 1 };
+        assert!(mark_nft.room_dependency().is_none());
+    }
+
+    #[test]
+    fn test_suspicious_activity_event() {
+        let event = ChainEvent::SuspiciousActivity {
+            room_id: "room_1".to_string(),
+            participant: Address::zero(),
+            activity_type: SuspiciousActivityType::TabSwitch,
+            details: Some("Switched tabs 3 times".to_string()),
+        };
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("SuspiciousActivity"));
+        assert!(debug_str.contains("TabSwitch"));
+    }
+
+    #[test]
+    fn test_id_verification_event() {
+        let event = ChainEvent::IdVerification {
+            room_id: "room_1".to_string(),
+            participant: Address::zero(),
+            status: VerificationStatus::Valid,
+            verified_by: "proctor_1".to_string(),
+        };
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("IdVerification"));
+        assert!(debug_str.contains("Valid"));
+    }
+
+    #[test]
+    fn test_recording_stopped_event() {
+        let event = ChainEvent::RecordingStopped {
+            room_id: "room_1".to_string(),
+            participant: Address::zero(),
+            duration_secs: 3600,
+            ipfs_cid: Some("QmRecording123".to_string()),
+        };
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("RecordingStopped"));
+        assert!(debug_str.contains("3600"));
+        assert!(debug_str.contains("QmRecording123"));
+    }
+
+    #[test]
+    fn test_participant_kicked_event() {
+        let event = ChainEvent::ParticipantKicked {
+            room_id: "room_1".to_string(),
+            proctor: Address::from_low_u64_be(1),
+            kicked: Address::from_low_u64_be(2),
+            reason: Some("Cheating detected".to_string()),
+        };
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("ParticipantKicked"));
+        assert!(debug_str.contains("Cheating detected"));
+    }
+
+    #[test]
+    fn test_transaction_tracker_new() {
+        let tracker = TransactionTracker::new();
+        assert!(tracker.last_tx_times.is_empty());
+        assert!(tracker.room_created.is_empty());
+    }
+
+    #[test]
+    fn test_transaction_tracker_needs_delay_for_uncreated_room() {
+        let tracker = TransactionTracker::new();
+
+        // Participant join should need delay if room not created
+        let event = ChainEvent::ParticipantJoined {
+            room_id: "room_1".to_string(),
+            participant: Address::zero(),
+            name: None,
+            role: Role::Student,
+        };
+
+        let delay = tracker.needs_delay(&event);
+        assert!(delay.is_some());
+        assert_eq!(delay.unwrap(), TX_DELAY);
+    }
+
+    #[test]
+    fn test_transaction_tracker_no_delay_for_room_created() {
+        let tracker = TransactionTracker::new();
+
+        // RoomCreated should not need delay (no room dependency)
+        let event = ChainEvent::RoomCreated {
+            room_id: "room_1".to_string(),
+            proctor: Address::zero(),
+            proctor_name: None,
+        };
+
+        let delay = tracker.needs_delay(&event);
+        // RoomCreated has no previous tx for its key, so no delay needed
+        assert!(delay.is_none());
+    }
+
+    #[test]
+    fn test_transaction_tracker_record_completion() {
+        let mut tracker = TransactionTracker::new();
+
+        let room_created = ChainEvent::RoomCreated {
+            room_id: "room_1".to_string(),
+            proctor: Address::zero(),
+            proctor_name: None,
+        };
+
+        tracker.record_completion(&room_created);
+
+        // Room should now be marked as created
+        assert!(tracker.room_created.get("room_1").copied().unwrap_or(false));
+        // Dependency key should be recorded
+        assert!(tracker.last_tx_times.contains_key("room:room_1"));
+    }
+
+    #[test]
+    fn test_transaction_tracker_no_delay_after_room_created() {
+        let mut tracker = TransactionTracker::new();
+
+        // First, mark room as created
+        let room_created = ChainEvent::RoomCreated {
+            room_id: "room_1".to_string(),
+            proctor: Address::zero(),
+            proctor_name: None,
+        };
+        tracker.record_completion(&room_created);
+
+        // Now a participant join should not need delay for room dependency
+        // (though it might need delay if same participant had recent tx)
+        let participant = Address::from_low_u64_be(999); // Different participant
+        let join_event = ChainEvent::ParticipantJoined {
+            room_id: "room_1".to_string(),
+            participant,
+            name: None,
+            role: Role::Student,
+        };
+
+        // Since this participant has no previous transaction, no delay needed
+        let delay = tracker.needs_delay(&join_event);
+        assert!(delay.is_none());
+    }
+
+    #[test]
+    fn test_all_chain_event_variants() {
+        // Ensure all event variants can be created and have valid dependency keys
+        let events = vec![
+            ChainEvent::RoomCreated {
+                room_id: "r1".to_string(),
+                proctor: Address::zero(),
+                proctor_name: None,
+            },
+            ChainEvent::ParticipantJoined {
+                room_id: "r1".to_string(),
+                participant: Address::zero(),
+                name: None,
+                role: Role::Student,
+            },
+            ChainEvent::ParticipantLeft {
+                room_id: "r1".to_string(),
+                participant: Address::zero(),
+                reason: LeaveReason::Normal,
+            },
+            ChainEvent::ParticipantKicked {
+                room_id: "r1".to_string(),
+                proctor: Address::zero(),
+                kicked: Address::zero(),
+                reason: None,
+            },
+            ChainEvent::IdVerification {
+                room_id: "r1".to_string(),
+                participant: Address::zero(),
+                status: VerificationStatus::Pending,
+                verified_by: "test".to_string(),
+            },
+            ChainEvent::SuspiciousActivity {
+                room_id: "r1".to_string(),
+                participant: Address::zero(),
+                activity_type: SuspiciousActivityType::Other,
+                details: None,
+            },
+            ChainEvent::RecordingStarted {
+                room_id: "r1".to_string(),
+                participant: Address::zero(),
+            },
+            ChainEvent::RecordingStopped {
+                room_id: "r1".to_string(),
+                participant: Address::zero(),
+                duration_secs: 0,
+                ipfs_cid: None,
+            },
+            ChainEvent::RoomClosed {
+                room_id: "r1".to_string(),
+                reason: RoomCloseReason::SessionCompleted,
+            },
+            ChainEvent::CreateExamResult {
+                room_id: "r1".to_string(),
+                participant: Address::zero(),
+                grade: 100,
+                exam_name: "Test".to_string(),
+            },
+            ChainEvent::AddRecordingToResult {
+                result_id: 1,
+                ipfs_cid: "Qm".to_string(),
+            },
+            ChainEvent::AddRecordingsToResult {
+                result_id: 1,
+                ipfs_cids: vec![],
+            },
+            ChainEvent::UpdateExamResultGrade {
+                result_id: 1,
+                new_grade: 100,
+            },
+            ChainEvent::MarkNftMinted { result_id: 1 },
+        ];
+
+        for event in events {
+            // All events should have a dependency key
+            assert!(event.dependency_key().is_some(), "Event {:?} should have dependency key", event);
+        }
+    }
 }

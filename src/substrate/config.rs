@@ -113,7 +113,7 @@ mod tests {
         assert_eq!(DEFAULT_ASSET_HUB_RPC_URL, "https://rpc.api.moonbase.moonbeam.network");
         assert_eq!(DEFAULT_SUBMISSION_TIMEOUT_SECS, 120);
         assert_eq!(DEFAULT_RETRY_COUNT, 5);
-        assert_eq!(DEFAULT_GAS_LIMIT, 500_000);
+        assert_eq!(DEFAULT_GAS_LIMIT, 3_000_000);
     }
 
     #[test]

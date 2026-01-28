@@ -24,12 +24,19 @@ RUN cargo build --release && \
 
 # Copy actual source code
 COPY src ./src
+COPY tests ./tests
 
 # Touch main.rs to ensure it gets rebuilt
 RUN touch src/main.rs && touch src/bin/cli.rs
 
 # Build the actual application
 RUN cargo build --release
+
+# Test stage - for running unit tests
+FROM builder AS tester
+
+# Run tests (this stage is used by docker-compose test service)
+CMD ["cargo", "test", "--", "--test-threads=1"]
 
 # Runtime stage
 FROM debian:bookworm-slim

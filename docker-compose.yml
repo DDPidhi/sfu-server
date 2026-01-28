@@ -24,6 +24,39 @@ services:
       - sfu-network
     restart: unless-stopped
 
+  # Test runner service - runs unit tests
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: tester
+    container_name: sfu-test
+    environment:
+      - RUST_BACKTRACE=1
+      - RUST_LOG=debug
+    profiles:
+      - test
+    networks:
+      - sfu-network
+
+  # CLI runner service - for running CLI validation against running services
+  cli:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sfu-cli
+    entrypoint: ["./sfu-cli"]
+    command: ["--server", "sfu-server:8080", "--ipfs", "http://ipfs:5001", "health"]
+    env_file:
+      - .env
+    depends_on:
+      - sfu-server
+      - ipfs
+    profiles:
+      - cli
+    networks:
+      - sfu-network
+
   ipfs:
     image: ipfs/kubo:latest
     container_name: ipfs

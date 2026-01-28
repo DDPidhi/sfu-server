@@ -222,6 +222,55 @@ impl IpfsClient {
     pub fn gateway_url(&self) -> &str {
         &self.config.gateway_url
     }
+
+    pub fn api_url(&self) -> &str {
+        &self.config.api_url
+    }
+
+    /// Upload bytes directly to IPFS (useful for testing)
+    pub async fn upload_bytes(&self, data: &[u8], file_name: Option<&str>) -> Result<IpfsUploadResult> {
+        let name = file_name.unwrap_or("upload.bin").to_string();
+
+        let file_part = Part::bytes(data.to_vec())
+            .file_name(name.clone());
+
+        let form = Form::new()
+            .part("file", file_part);
+
+        let add_url = format!("{}/api/v0/add", self.config.api_url);
+
+        let response = self.client
+            .post(&add_url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| {
+                SfuError::IpfsUploadFailed(format!("Request failed: {}", e))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(SfuError::IpfsUploadFailed(format!(
+                "Upload failed with status {}: {}",
+                status, error_text
+            )));
+        }
+
+        let ipfs_response: IpfsAddResponse = response.json().await.map_err(|e| {
+            SfuError::IpfsUploadFailed(format!("Failed to parse response: {}", e))
+        })?;
+
+        let cid = ipfs_response.hash;
+        let gateway_url = format!("{}/{}", self.config.gateway_url, cid);
+        let size: u64 = ipfs_response.size.parse().unwrap_or(0);
+
+        Ok(IpfsUploadResult {
+            cid,
+            gateway_url,
+            size,
+        })
+    }
 }
 
 #[cfg(test)]

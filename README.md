@@ -71,6 +71,25 @@ On first run, `.env` is automatically created from `.env.example`.
 | `make shell` | Shell into SFU container |
 | `make help` | Show all commands |
 
+**Testing:**
+
+| Command | Description |
+|---------|-------------|
+| `make test` | Run tests in Docker (recommended) |
+| `make test-local` | Run tests locally |
+| `make test-unit` | Run unit tests only |
+
+**CLI Validation:**
+
+| Command | Description |
+|---------|-------------|
+| `make cli-validate` | Run ALL validation tests |
+| `make cli-validate-sfu` | Run SFU server tests |
+| `make cli-validate-blockchain` | Run blockchain tests |
+| `make cli-validate-ipfs` | Run IPFS tests |
+| `make cli-health` | Check server health |
+| `make cli-config` | Get server configuration |
+
 **Services:**
 - WebSocket: `ws://localhost:8080/sfu`
 - Health Check: `http://localhost:8080/sfu/health`

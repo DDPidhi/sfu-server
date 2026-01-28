@@ -285,7 +285,7 @@ mod tests {
         // Remove student
         let result = room_manager.remove_peer(&student_id).await;
         assert!(result.is_some());
-        let (removed_room_id, role) = result.unwrap();
+        let (removed_room_id, role, _wallet) = result.unwrap();
         assert_eq!(removed_room_id, room_id);
         matches!(role, PeerRole::Student);
 
